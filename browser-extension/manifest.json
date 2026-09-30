@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Assistant Bridge",
+  "version": "1.0.0",
+  "description": "WebSocket bridge between assistant and Chrome — enables browser control with real login sessions.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "activeTab",
+    "webNavigation",
+    "alarms",
+    "offscreen"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

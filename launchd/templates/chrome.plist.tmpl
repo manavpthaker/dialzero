@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rendered by scripts/install-launchd.ts. Keeps Chrome open for the browser module. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{LABEL_PREFIX}}.chrome</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</string>
+    <string>--no-first-run</string>
+    <string>--no-default-browser-check</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{{REPO}}/logs/chrome.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{REPO}}/logs/chrome.err</string>
+</dict>
+</plist>

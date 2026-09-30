@@ -1,0 +1,63 @@
+node_modules/
+dist/
+.env
+# Any .env backup/variant carries live secrets — never commit. (.env.example is
+# already tracked, so this only catches new variants like .env.bak.<ts>, .env.local)
+.env.*
+!.env.example
+auth_state/
+*.db
+*.db-shm
+*.db-wal
+.wwebjs_cache/
+.claude/*
+!.claude/skills/
+# Tier 1 Phase 4 — meeting daemon runtime files. assistant is a SERVICE_REPO
+# in sync-repos.sh, which `git pull`s every 5 min. Local writes to tracked
+# paths would fail the pull (logged-and-silent) and halt auto-deploy.
+/data/meeting-state.json
+/data/soccer-reminders/
+/logs/*.log
+
+# Onboarding-generated personal config (created by `npm run onboard`). These hold
+# the operator's name, people, voice, and facts — never commit them. The repo
+# ships generic starting points in config/profile.example.json + context/_examples/.
+config/profile.json
+.onboard-state.json
+context/shared/identity.md
+context/shared/voice.md
+context/shared/profile.md
+context/seeds/facts.json
+context/admin/CLAUDE.md
+context/personal/CLAUDE.md
+context/finance/CLAUDE.md
+context/work/CLAUDE.md
+context/health/CLAUDE.md
+context/job-search/CLAUDE.md
+context/family/CLAUDE.md
+
+# Operator-specific context kept locally on the mac mini after the public-template
+# scrub (#23/#24 deleted these from tracking). These six per-group dirs hold real
+# operator data — household plans, job analyses, finances, and each group's skills/.
+# Never re-commit to the public template; generic stand-ins live in context/_examples/.
+# (Synthetic groups brain-pulse/idea-pulse/reflection/content and context/shared/ stay tracked.)
+context/admin/
+context/finance/
+context/work/
+context/health/
+context/personal/
+context/job-search/
+context/family/
+
+# macOS + scratch media
+.DS_Store
+*.wav
+
+# Personal state never belongs in the repo
+.codex/
+context/seeds/*.json
+context/Users/
+data/
+*.bak*
+AUTOMATIONS_OFF
+node_modules

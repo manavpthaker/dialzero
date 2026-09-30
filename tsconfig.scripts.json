@@ -1,0 +1,37 @@
+// Typecheck-only config covering BOTH src/ and scripts/.
+//
+// Why this exists: the main tsconfig.json is `rootDir: "src"` / `include: ["src"]`
+// because it emits to dist/ and only src/ is compiled. Everything under scripts/
+// runs through tsx at runtime and was therefore never typechecked at all -- which
+// is where all three extraction daemons and the entire mining/backfill surface
+// live. `npm run build` is the only checker in this repo, so that code shipped
+// unchecked.
+//
+// Why it is NOT wired into `npm run build`: scripts/sync-repos.sh:133 runs
+//   npm run build || log "assistant: build FAILED"
+// and then kickstarts com.assistant.agent at :138 regardless. A build failure does
+// not stop the restart -- it silently reboots the agent onto stale dist/ output,
+// with the only evidence in a log file. Making `build` stricter would convert a
+// type error in a test script into a silent production restart. Keep the emit
+// path (`npm run build`) and the correctness path (`npm run typecheck`) separate.
+//
+// Run: npm run typecheck
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src", "scripts"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    // Dead WhatsApp-era code: imports `whatsapp-web.js`, which is neither
+    // installed nor in package.json, so this script cannot run at all. It also
+    // predates the iMessage migration -- if it *could* run it would send live
+    // test messages over a channel that no longer exists. CLAUDE.md still
+    // documents it as a working command. Delete the file and that doc line;
+    // excluded here only so it does not block typechecking everything else.
+    "scripts/test-groups.ts"
+  ]
+}

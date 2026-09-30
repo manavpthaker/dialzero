@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rendered by scripts/install-launchd.ts (npm run install:service). Tokens:
+     {{NODE}} {{REPO}} {{HOME}} {{LABEL_PREFIX}} {{PATH}} -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{LABEL_PREFIX}}.inbox-signal-daemon</string>
+  <!-- launchd reads no shell profile, so give child processes Homebrew's PATH. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{{PATH}}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd "{{REPO}}" &amp;&amp; set -a &amp;&amp; { [ ! -f .env ] || . ./.env; } &amp;&amp; set +a &amp;&amp; exec "{{NODE}}" --import "{{REPO}}/node_modules/tsx/dist/loader.mjs" scripts/inbox-signal-daemon.ts</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart after a crash, but stay stopped after a clean exit (the daemon
+       exits 0 when its module is switched off). -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>{{REPO}}/logs/inbox-signal-daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{REPO}}/logs/inbox-signal-daemon.err</string>
+</dict>
+</plist>

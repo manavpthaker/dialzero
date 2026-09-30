@@ -1,0 +1,38 @@
+[
+  {
+    "subject": "owner",
+    "predicate": "prefers",
+    "object": "short, direct replies over long explanations",
+    "fact_type": "preference"
+  },
+  {
+    "subject": "owner",
+    "predicate": "timezone",
+    "object": "America/Chicago",
+    "fact_type": "fact"
+  },
+  {
+    "subject": "myproject",
+    "predicate": "decision",
+    "object": "ship the v1 beta before adding new features",
+    "fact_type": "decision"
+  },
+  {
+    "subject": "owner",
+    "predicate": "committed to",
+    "object": "send the proposal draft by end of week",
+    "fact_type": "commitment"
+  },
+  {
+    "subject": "myproject",
+    "predicate": "monthly active users",
+    "object": "1200",
+    "fact_type": "metric"
+  },
+  {
+    "subject": "owner",
+    "predicate": "works out",
+    "object": "three mornings a week before 8am",
+    "fact_type": "fact"
+  }
+]

@@ -1,0 +1,40 @@
+{
+  "_comment": "Copy to config/profile.json (gitignored) or let `npm run onboard` generate it. This is the single source of truth for who the assistant is and who it serves. Secrets (phone/email) live in .env, referenced here by env-var name.",
+
+  "botName": "Assistant",
+  "triggerWord": "@assistant",
+  "householdName": "household",
+  "timezone": "America/New_York",
+  "quietHours": { "start": 21, "end": 7 },
+
+  "owner": {
+    "id": "owner",
+    "name": "Owner",
+    "fullName": "Owner Name",
+    "shortName": "Owner",
+    "pronouns": { "subject": "they", "object": "them", "possessive": "their" },
+    "tone": "direct",
+    "role": "admin",
+    "allowedGroups": ["admin", "family", "work", "health", "reflection", "brain-pulse"],
+    "phoneEnv": "USER_OWNER",
+    "emailEnv": "USER_OWNER_EMAIL"
+  },
+
+  "members": [
+    {
+      "id": "partner",
+      "name": "Partner",
+      "tone": "warm",
+      "role": "member",
+      "allowedGroups": ["family"],
+      "phoneEnv": "USER_PARTNER",
+      "emailEnv": "USER_PARTNER_EMAIL"
+    }
+  ],
+
+  "people": [
+    { "name": "Partner", "relationship": "partner", "notes": "The owner's partner. Their assistant access is limited to the shared Family iMessage group." }
+  ],
+
+  "groupsEnabled": ["admin", "family"]
+}

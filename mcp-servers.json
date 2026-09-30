@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "instacart": {
+      "url": "https://mcp.dev.instacart.tools/mcp",
+      "headers": {
+        "Authorization": "Bearer ${INSTACART_API_KEY}"
+      }
+    },
+    "spotify": {
+      "command": "/opt/homebrew/bin/npx",
+      "args": ["-y", "spotify-mcp-server"],
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}

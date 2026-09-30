@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rendered by scripts/install-launchd.ts (npm run install:service). Tokens:
+     {{NODE}} {{REPO}} {{HOME}} {{LABEL_PREFIX}} {{PATH}} -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{LABEL_PREFIX}}.contacts-sync</string>
+  <!-- launchd reads no shell profile, so give child processes Homebrew's PATH. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{{PATH}}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd "{{REPO}}" &amp;&amp; set -a &amp;&amp; { [ ! -f .env ] || . ./.env; } &amp;&amp; set +a &amp;&amp; exec "{{NODE}}" --import "{{REPO}}/node_modules/tsx/dist/loader.mjs" scripts/import-contacts.ts</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>{{REPO}}/logs/contacts-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{REPO}}/logs/contacts-sync.err</string>
+</dict>
+</plist>
