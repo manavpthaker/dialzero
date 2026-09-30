@@ -66,6 +66,8 @@ Run `npm run onboard`. It's a short conversation. Tell them to answer naturally;
 
 It writes `config/profile.json` and a few files in `context/`. The checker confirms them.
 
+**Optional quick try:** right after the interview, `npm run chat` lets them talk to the assistant in the terminal (nothing is texted to anyone). It's a nice moment: it already knows their people and can set a reminder or search the web. Suggest it, then continue.
+
 ## Step 4: Permissions
 
 **Why:** macOS protects Messages and the screen; the assistant needs explicit permission.

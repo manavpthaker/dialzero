@@ -47,6 +47,8 @@ You don't need to know how to code. You need a coding assistant: [Claude Code](h
 
 It goes one step at a time: check your Mac, pick Claude or OpenAI and get your key, interview you so the assistant knows you, walk you through each permission, connect Google, and send you your first text. It explains every step in plain words and checks that each one worked before moving on. You can stop and pick it back up any time: say "set me up" again and it continues where you left off.
 
+**Want to try it before connecting Messages?** After the interview, `npm run chat` lets you talk to your assistant right in the terminal. Nothing gets texted to anyone.
+
 **Comfortable in a terminal?** `npm install && npm run setup` runs the same checklist as a wizard. See [setup/GUIDE.md](setup/GUIDE.md) for every step.
 
 ## How it works (in one paragraph)

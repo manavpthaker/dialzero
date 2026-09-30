@@ -4,7 +4,13 @@ import { isValidEmailMessageId } from '../email/source.js';
 import { getTimezone } from '../config.js';
 import { tzAbbrev } from '../lib/time.js';
 
+/** Tasks only reach the phone once Google is connected (npm run auth:google). */
+function googleTasksConnected(): boolean {
+  return Boolean(process.env.GOOGLE_CALENDAR_CLIENT_ID && process.env.GOOGLE_CALENDAR_CLIENT_SECRET && process.env.GOOGLE_CALENDAR_REFRESH_TOKEN);
+}
+
 function fireAndForgetPush(taskId: number) {
+  if (!googleTasksConnected()) return;
   import('../sync/tasks-sync.js')
     .then(async (m) => {
       const t = getTaskById(taskId);
@@ -35,7 +41,7 @@ export const taskTools: ToolDef[] = [
   {
     definition: {
       name: 'create_task',
-      description: 'Create a tracked task for a human or for assistant. Tasks assigned to a human (owner/partner) automatically sync to Google Tasks on the iPhone. USE WHEN: user says "remind me to", "I need to", "don\'t let me forget", "follow up on", or describes any action they\'ll do later.',
+      description: 'Create a tracked task for a human or for assistant. Tasks assigned to a human (owner/partner) sync to Google Tasks on their phone when Google is connected; the result says whether it synced, so do not claim it is on their phone unless it says so. USE WHEN: user says "remind me to", "I need to", "don\'t let me forget", "follow up on", or describes any action they\'ll do later.',
       input_schema: {
         type: 'object' as const,
         properties: {
@@ -77,7 +83,11 @@ export const taskTools: ToolDef[] = [
       fireAndForgetPush(id);
       const dueStr = due_date ? ` — due ${new Date(due_date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}` : '';
       const durStr = duration_minutes ? ` (${duration_minutes} min)` : '';
-      return `Task #${id} created: "${title}" → ${assignee || 'owner'}${dueStr}${durStr}`;
+      const human = !assignee || assignee === 'owner' || assignee === 'partner';
+      const where = !human ? '' : googleTasksConnected()
+        ? ' (syncing to Google Tasks on their phone)'
+        : " (saved here only: Google isn't connected, so it is NOT on their phone; say so if relevant)";
+      return `Task #${id} created: "${title}" → ${assignee || 'owner'}${dueStr}${durStr}${where}`;
     },
   },
   {

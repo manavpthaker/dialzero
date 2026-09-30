@@ -13,7 +13,7 @@
 // the caller falls back to the original heuristic. Never throws.
 
 import { parseStrEnv, parseNumEnv, parseBoolEnv } from './lib/env.js';
-import { OPENAI_ROUTER_MODEL, openAIText, llmConfigured } from './lib/openai.js';
+import { OPENAI_ROUTER_MODEL, openAIText, llmConfigured, llmProvider } from './lib/openai.js';
 
 export interface RetrievalPlan {
   people: string[];       // resolved person names/entities to look up
@@ -24,7 +24,8 @@ export interface RetrievalPlan {
 const ENABLED = parseBoolEnv('ASSISTANT_SMART_RETRIEVAL', true);
 // Reuse the router model by default; override independently if desired.
 const MODEL = parseStrEnv('OPENAI_RETRIEVAL_MODEL', OPENAI_ROUTER_MODEL);
-const TIMEOUT_MS = parseNumEnv('ASSISTANT_RETRIEVAL_TIMEOUT_MS', 2000);
+// Claude's quick model answers in ~1-3s, so it gets a longer default window.
+const TIMEOUT_MS = parseNumEnv('ASSISTANT_RETRIEVAL_TIMEOUT_MS', llmProvider() === 'claude' ? 5000 : 2000);
 
 const SYSTEM =
   "You are the retrieval planner for a personal AI chief-of-staff. Given the user's latest " +
