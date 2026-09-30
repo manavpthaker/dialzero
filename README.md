@@ -21,6 +21,7 @@ It's not an app you open. It's a contact in your phone.
 | "Tell Sam I'm running 10 late" | Texts Sam for you, as you. |
 | "Email the landlord about the leak" | Writes and sends the email from your Gmail. |
 | "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. |
+| "Cancel my gym membership" | Calls them (or emails, or uses their site in your browser with your OK), asks to cancel, and tells you what they said. It won't accept a retention offer or a fee, and if they want a PIN or card digits, it asks you instead. |
 | "Book a table for 4 Saturday at 7" | Books it online (never enters a card), or calls if it can't. |
 | "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
 | A voice memo | Transcribes it and files away what matters. |
@@ -59,7 +60,7 @@ Your Mac signs into Messages with an Apple ID. When you text that Apple ID, the 
 
 Honest list, compared with commercial assistants like Meta's Muse or Instinct:
 
-- It doesn't pay bills, cancel subscriptions, or talk to other companies' AI agents.
+- It doesn't pay bills or talk to other companies' AI agents. It can ask to cancel a subscription, but it can't force one through: if a company insists on identity checks or a retention call with you, it hands that back to you.
 - Purchases are limited: it can reorder something online behind your approval, and it stops at the cart for groceries.
 - No app, no hardware, no avatar. It's a contact you text.
 - It needs a Mac that stays on. No Mac, no assistant.
