@@ -1,7 +1,7 @@
 # Ask from Siri
 
 Talk to your assistant from your iPhone and hear the answer, without opening Messages. Say
-"Hey Siri, ask Juniper" (whatever you named it), ask your question, and it answers out loud.
+"Hey Siri, ask Milo" (whatever you named it), ask your question, and it answers out loud.
 
 **How it works:** an iPhone Shortcut turns what you say into text, sends it to your Mac, and speaks the
 reply. It's the same assistant and the same conversation as your texts, so "what did I just ask you?"
@@ -60,12 +60,12 @@ In the Shortcuts app on your iPhone, make a new shortcut with four actions:
 3. **Get Dictionary Value:** key `reply`, from **Contents of URL**.
 4. **Speak Text:** **Dictionary Value**.
 
-Name the shortcut "Ask" plus your assistant's name, so "Hey Siri, ask Juniper" starts it. You can also
+Name the shortcut "Ask" plus your assistant's name, so "Hey Siri, ask Milo" starts it. You can also
 put it on your Home Screen or the Action Button.
 
 ## 5. Try it
 
-Say "Hey Siri, ask Juniper what's on my calendar tomorrow." You should hear a one to three sentence
+Say "Hey Siri, ask Milo what's on my calendar tomorrow." You should hear a one to three sentence
 answer. If something is wrong, the Shortcut speaks the problem (for example a wrong password) instead of
 failing silently, and the Mac's log shows each request.
 

@@ -24,7 +24,7 @@ It's not an app you open. It's a contact in your phone.
 | "Cancel my gym membership" | Calls them (or emails, or uses their site in your browser with your OK), asks to cancel, and tells you what they said. It won't accept a retention offer or a fee, and if they want a PIN or card digits, it asks you instead. |
 | "Book a table for 4 Saturday at 7" | Books it online (never enters a card), or calls if it can't. |
 | "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
-| "Hey Siri, ask Juniper what's next" | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
+| "Hey Siri, ask Milo what's next" (whatever you named it) | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
 | A voice memo | Transcribes it and files away what matters. |
 
 Plus a shared **family chat**: add it to a group text with your partner and it keeps a shared calendar and grocery list.
