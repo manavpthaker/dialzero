@@ -15,6 +15,7 @@
     "pause": "tsx scripts/install-launchd.ts --pause",
     "resume": "tsx scripts/install-launchd.ts --resume",
     "dev": "tsx src/index.ts",
+    "chat": "tsx scripts/chat.ts",
     "onboard": "tsx scripts/onboard.ts",
     "onboard:dry": "tsx scripts/onboard.ts --dry",
     "setup": "tsx scripts/setup.ts",

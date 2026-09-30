@@ -311,7 +311,18 @@ export function isFamilyScopedIMessage(
   return (input.participantHandles ?? []).some((handle) => isFamilyOnlyHandle(handle));
 }
 
+/**
+ * Terminal chat mode (scripts/chat.ts) replaces real sends with this, so you can
+ * try the assistant without Messages: texts it would send are printed instead.
+ */
+type OutboundOverride = (recipient: string, text: string) => Promise<void>;
+let outboundOverride: OutboundOverride | null = null;
+export function setOutboundOverride(fn: OutboundOverride | null): void {
+  outboundOverride = fn;
+}
+
 export async function sendMessage(recipient: string, text: string) {
+  if (outboundOverride) return outboundOverride(recipient, toPlainText(text));
   // iMessage renders no markdown — strip it here, at the single outbound
   // chokepoint, so EVERY message (agent replies, scheduler briefs, proactive
   // pings) is plaintext, not just the paths that route through cos-outbound.
@@ -361,6 +372,7 @@ end tell`
 // text-only (sendMessage); this is the one outbound-attachment path, used by
 // computer_use's send_screenshot. Mirrors sendMessage's DM-vs-group branch.
 export async function sendImageMessage(recipient: string, filePath: string): Promise<void> {
+  if (outboundOverride) return outboundOverride(recipient, `[image: ${filePath}]`);
   const escapedPath = filePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   try {
     if (isGroupChat(recipient)) {
