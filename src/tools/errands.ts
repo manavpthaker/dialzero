@@ -3,6 +3,7 @@
 // itself only starts from confirm_action ("go #action:N") via the `errand`
 // executor in actions.ts; start_errand just stages the proposal.
 
+import { proposalText } from '../lib/proposal-text.js';
 import type { ToolDef, ToolContext } from './index.js';
 import { proposeAction, getAction, getErrand, listErrands } from '../db.js';
 import { ownerAskedForCall } from '../lib/owner-request.js';
@@ -16,7 +17,7 @@ import { prepareErrand, addErrandNote, extendErrand, cancelErrand, describeErran
 const MAX_TARGETS = 3;
 
 function dmFormat(id: number, summary: string): string {
-  return `#${id} ${summary}\n↩ go #action:${id} · cancel · or say what to change`;
+  return proposalText(id, summary);
 }
 
 // The check lives in lib/owner-request.ts (shared with book_online); kept

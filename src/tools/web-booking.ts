@@ -2,6 +2,7 @@
 // booking-scoped browser tools the booking sub-agent gets (registry key
 // `booking-browser`, never given to a chat group). Logic: src/web-booking.ts.
 
+import { proposalText } from '../lib/proposal-text.js';
 import type { ToolDef, ToolContext } from './index.js';
 import { proposeAction, getAction } from '../db.js';
 import { checkActionsEnabled } from '../lib/spend-cap.js';
@@ -9,11 +10,11 @@ import { ownerAskedForBooking } from '../lib/owner-request.js';
 import { browserTools } from './browser.js';
 import {
   prepareWebBooking, startWebBooking, bookingDeps, bookingWindowOpen, paymentRefusal,
-  NOT_CONNECTED, type BookingPayload,
+  NOT_CONNECTED, PAYMENT_CLICK, type BookingPayload,
 } from '../web-booking.js';
 
 function dmFormat(id: number, summary: string): string {
-  return `#${id} ${summary}\n↩ go #action:${id} · cancel · or say what to change`;
+  return proposalText(id, summary);
 }
 
 export const webBookingTools: ToolDef[] = [
@@ -77,6 +78,9 @@ export const bookingBrowserTools: ToolDef[] = browserTools
       if (!bookingWindowOpen()) return 'Refused: the booking window is closed. Stop and return your JSON result now.';
       const refusal = paymentRefusal(input);
       if (refusal) return refusal;
-      return t.handler(input, { ...(context ?? { groupKey: 'booking' }), groupKey: 'booking' });
+      // Clicks carry the pay-button rule into Chrome, where the real element's
+      // label is checked (a click by snapshot index has no text to check here).
+      const guarded = input.action === 'click' ? { ...input, guard: PAYMENT_CLICK.source } : input;
+      return t.handler(guarded, { ...(context ?? { groupKey: 'booking' }), groupKey: 'booking' });
     },
   }));

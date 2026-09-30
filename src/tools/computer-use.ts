@@ -18,6 +18,7 @@
 // We freeze the screen-points + image-px geometry into the action payload at
 // propose time and scale image-px → points at execute time. See CLAUDE.md.
 
+import { proposalText } from '../lib/proposal-text.js';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { readFileSync, existsSync, unlinkSync } from 'fs';
@@ -27,6 +28,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { ToolDef, ToolContext } from './index.js';
 import { proposeAction, getAction, logComputerUseAction, type Action } from '../db.js';
 import { sendImageMessage } from '../channels/imessage.js';
+import { isBrowserConnected } from '../browser-bridge.js';
 
 const exec = promisify(execFile);
 
@@ -213,7 +215,7 @@ function taskSecondsLeft(group: string): number {
 // actions.ts already imports runComputerUseAction from here). No cost line —
 // computer use never spends money.
 function dmFormat(a: Action): string {
-  return `#${a.id} ${a.summary}\n↩ go #action:${a.id} · cancel · or say what to change`;
+  return proposalText(a.id, a.summary);
 }
 
 const MAX_TYPE_LEN = 2000;
@@ -223,11 +225,19 @@ function sanitizeKey(key: string): string {
   return key.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
 }
 
+const WEB_PLAN = /(https?:\/\/|www\.|\b[a-z0-9-]+\.(com|ai|io|net|org|app|co|us)\b|\bweb ?(site|page|app)\b|\bsubscription\b|\bmembership\b|\bsign ?in\b|\blog ?in\b|\bin (the )?browser\b|\bin chrome\b|\baccount settings\b|\bcheckout\b)/i;
+const DESKTOP_PLAN = /\b(lastpass|extension|finder|system settings|system preferences|restart chrome|quit chrome|dialog|permission)\b/i;
+
+/** A plan that's really a website task (and not about Chrome's own menus or other apps). */
+export function looksLikeWebTask(plan: string): boolean {
+  return WEB_PLAN.test(plan) && !DESKTOP_PLAN.test(plan);
+}
+
 export const computerUseTools: ToolDef[] = [
   {
     definition: {
       name: 'computer_use',
-      description: `See and control the Mac mini desktop (the whole machine, not just Chrome — use browser_action for in-page web work). Single main display, single cursor.
+      description: `See and control the Mac mini desktop (the whole machine, not just Chrome — use do_online / browser_action for ANY website work). Single main display, single cursor.
 
 Workflow: take ONE screenshot, read it, then act — don't poll-screenshot in a loop. Click coordinates are in the pixel space of the screenshot image you were just shown (the text block reports its size).
 
@@ -243,7 +253,9 @@ Actions:
 - start_task: Propose a MULTI-STEP desktop task for one-shot approval. Pass a plain-English "plan" of what you'll do. The user approves the whole task once with "go #action:N"; for the next few minutes your click/type/key_press/scroll run WITHOUT per-action approval, so you can screenshot→act→screenshot→act through the task. Free (it only stages the approval).
 - end_task: Close the task-approval window early once the task is done (gating returns to per-action). Free.
 
-**Choosing the flow:** for a SINGLE action (one click/type), just call it directly — it's individually gated. For ANYTHING multi-step (fill a form, navigate a UI, "open X and do Y"), call start_task FIRST with the plan, wait for the user's "go #action:N", then carry out the steps (screenshot between them — coordinates change as the UI changes), and call end_task when finished. Do NOT propose dozens of separate clicks.
+**Websites are NOT desktop work.** Anything on a website (cancel a subscription, export data, change a setting, fill a web form, read a page) goes through Chrome: do_online, book_online, or browser_action. Use computer_use only for things outside the web page: other Mac apps, LastPass or Chrome extension menus, system dialogs. start_task refuses a website plan while Chrome is connected.
+
+**Choosing the flow:** for a SINGLE action (one click/type), just call it directly — it's individually gated. For anything multi-step on the desktop (navigate an app UI, "open X and do Y"), call start_task FIRST with the plan, wait for the user's "go #action:N", then carry out the steps (screenshot between them — coordinates change as the UI changes), and call end_task when finished. Do NOT propose dozens of separate clicks.
 
 Gated single actions are NOT executed immediately: they're staged behind the confirmation gate and the user must reply "go #action:N" first.
 
@@ -334,6 +346,11 @@ You DO have this tool available — never tell the user you can't see or control
       if (action === 'start_task') {
         const plan = String(input.plan || '').trim();
         if (!plan) return 'computer_use start_task: missing "plan" (describe the multi-step task you intend to carry out).';
+        // Website work goes through Chrome (do_online / browser_action), not the
+        // desktop. Desktop control is only for things outside the web page.
+        if (isBrowserConnected() && looksLikeWebTask(plan)) {
+          return 'Not started: this is a website task, so do it in Chrome, not by controlling the desktop. Use do_online (cancel, export, change a setting; pass owner_request if the owner asked) or browser_action for reading a page. Use computer_use only for things outside Chrome (other apps, LastPass or extension menus, system dialogs).';
+        }
         const id = proposeAction({
           kind: 'computer_use_task',
           tool_name: 'computer_use_task',
@@ -345,7 +362,7 @@ You DO have this tool available — never tell the user you can't see or control
           created_by_group: group,
         });
         const mins = Math.round(TASK_WINDOW_MS / 60000);
-        return `Desktop task #${id}: ${plan}\nReply \`go #action:${id}\` to let me carry out the whole task — my clicks/types will run for ~${mins} min without per-step approval. Or \`edit #action:${id} <change>\` / \`cancel #action:${id}\`.`;
+        return proposalText(id, `${plan} (on the Mac, about ${mins} min)`);
       }
       if (action === 'end_task') {
         const wasActive = taskApproved(group);

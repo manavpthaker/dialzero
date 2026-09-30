@@ -64,7 +64,9 @@ export const browserTools: ToolDef[] = [
 
 Actions:
 - navigate: Go to a URL, returns page title + text
-- click: Click an element by CSS selector or text
+- snapshot: A numbered list of everything visible and clickable on the page ([12] row "Sep 24 meeting"). Use it whenever you don't know what to click, then click by index.
+- click: Click an element by index (from snapshot, most reliable), CSS selector, or text (matches buttons, links, list rows, anything showing that text)
+- scroll: Scroll down/up/top/bottom (amount = screens, default 1). Scrolls the page's main list if it has one. Long lists load more as you scroll; snapshot again after.
 - extract_text: Extract text from elements by CSS selector
 - get_page_source: Get raw HTML (truncated to 50k chars)
 - fill_input: Fill a real <input>/<textarea> field by selector (sets .value). NO-OP on contenteditable rich-text editors — use type_editor for those.
@@ -74,7 +76,9 @@ Actions:
 - get_current_url: Get active tab URL and title
 - list_tabs: List all open tabs
 - switch_tab: Switch to a tab by ID
-- upload_file: Attach a file (image) to a hidden <input type=file> — how LinkedIn's composer takes media. First click the photo/media button so the file input exists, then call upload_file with that input's selector and the image's local PATH (e.g. the day's charter image PNG). Assistant reads the file. Params: selector, path (preferred) OR base64, optional filename/mimeType.`,
+- upload_file: Attach a file (image) to a hidden <input type=file> — how LinkedIn's composer takes media. First click the photo/media button so the file input exists, then call upload_file with that input's selector and the image's local PATH (e.g. the day's charter image PNG). Assistant reads the file. Params: selector, path (preferred) OR base64, optional filename/mimeType.
+
+Logins: if the owner's password manager fills a login page, click its sign-in button. If a login page stays empty, or asks for a password, a master password, or a code, STOP and tell the owner which site needs them to log in. Never type a password or code, never guess one, and never try to open the password manager itself.`,
       input_schema: {
         type: 'object' as const,
         properties: {
@@ -83,13 +87,16 @@ Actions:
             enum: [
               'navigate', 'click', 'extract_text', 'get_page_source',
               'fill_input', 'type_editor', 'submit_form', 'wait_for_selector',
-              'get_current_url', 'list_tabs', 'switch_tab', 'upload_file',
+              'get_current_url', 'list_tabs', 'switch_tab', 'upload_file', 'snapshot', 'scroll',
             ],
             description: 'The browser action to perform',
           },
           url: { type: 'string', description: 'URL to navigate to (for navigate action)' },
           selector: { type: 'string', description: 'CSS selector (for click, extract_text, fill_input, type_editor, submit_form, wait_for_selector, upload_file)' },
           text: { type: 'string', description: 'Text content to find element by (for click action, alternative to selector)' },
+          index: { type: 'number', description: 'Element number from the last snapshot (for click)' },
+          direction: { type: 'string', enum: ['down', 'up', 'top', 'bottom'], description: 'For scroll' },
+          amount: { type: 'number', description: 'Screens to scroll (for scroll, default 1)' },
           value: { type: 'string', description: 'Value to fill (for fill_input) or type (for type_editor)' },
           path: { type: 'string', description: 'Local image path to attach (for upload_file, preferred over base64) — must be a .png/.jpg under BROWSER_UPLOAD_ROOTS' },
           base64: { type: 'string', description: 'Base64-encoded file bytes (for upload_file, alternative to path)' },
@@ -177,6 +184,10 @@ Actions:
           if (action === 'get_page_source' && r.html) {
             const note = r.truncated ? `\n\n[Truncated — full page is ${r.length} chars]` : '';
             return `${r.html}${note}`;
+          }
+
+          if (action === 'snapshot' && typeof r.items === 'string') {
+            return `${r.title}\n${r.url}\nScroll: ${r.scroll || 'n/a'} · ${r.count} clickable\n\n${r.items || '(nothing clickable found)'}`;
           }
 
           // Format list_tabs

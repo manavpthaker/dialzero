@@ -19,6 +19,7 @@ import { startVoice } from './voice.js';
 import { startPhone } from './phone.js';
 import { startErrands } from './errands.js';
 import { startWakeUpCalls } from './wakeup.js';
+import { startWebTaskRunner } from './web-task.js';
 import { startCheckins } from './checkins.js';
 import { automationsOff, automationAllowed } from './lib/automations-off.js';
 import { withLlmContext } from './lib/llm-context.js';
@@ -80,6 +81,8 @@ async function main() {
     // Wake-up calls: the owner set each one themselves, so also outside the gate.
     // Own kill switch: WAKEUP_CALLS_ENABLED.
     ['wakeup', startWakeUpCalls],
+    // Website jobs the owner started keep going across restarts until done.
+    ['web-task', startWebTaskRunner],
   ];
   for (const [key, start] of services) {
     if (!isOwnedOn('start', key)) continue;

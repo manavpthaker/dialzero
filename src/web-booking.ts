@@ -40,10 +40,10 @@ export interface BookingPayload {
 
 type Prepared = { payload: Record<string, unknown>; summary: string } | { error: string };
 
-const FORBIDDEN_SHARE = /\b(card|credit|debit|cvv|cvc|ssn|social security|password|passcode|bank|routing|account number|pin)\b/i;
+export const FORBIDDEN_SHARE = /\b(card|credit|debit|cvv|cvc|ssn|social security|password|passcode|bank|routing|account number|pin)\b/i;
 
 /** Luhn check on a digit run: a card number, as opposed to a phone number. */
-function looksLikeCardNumber(text: string): boolean {
+export function looksLikeCardNumber(text: string): boolean {
   for (const m of text.matchAll(/(?:\d[ -]?){13,19}/g)) {
     const digits = m[0].replace(/\D/g, '');
     if (digits.length < 13 || digits.length > 19) continue;
@@ -88,7 +88,7 @@ export function prepareWebBooking(p: Record<string, unknown>): Prepared {
   if (s('owner_request')) payload.owner_request = s('owner_request');
   const emoji = isFood(what, where) ? '🍽️' : '🗓️';
   const partyText = party && !new RegExp(`\\b${party}\\b`).test(what) ? `, ${party} people` : '';
-  const summary = `${emoji} Book ${what} at ${where}, ${when}${partyText}\nOnline in Chrome, no card or deposit · shares ${share}`;
+  const summary = `${emoji} Book ${what} at ${where}, ${when}${partyText}.`;
   return { payload: payload as unknown as Record<string, unknown>, summary };
 }
 
@@ -169,7 +169,8 @@ export function bookingWindowOpen(now = Date.now()): boolean {
 }
 
 const PAYMENT_FIELD = /card|cc-?(num|number|exp|csc)|cvv|cvc|security.?code|expir|payment|billing|iban|routing/i;
-const PAYMENT_CLICK = /\b(pay|purchase|buy now|place order|add (a )?card|save card|add payment|checkout)\b/i;
+const CARD_FIELD = /card|cc-?(num|number|exp|csc)|cvv|cvc|security.?code|expir|iban|routing/i;
+export const PAYMENT_CLICK = /\b(pay|purchase|buy now|place order|add (a )?card|save card|add payment|checkout)\b/i;
 
 /**
  * Hard stop under the prompt: the booking browser can't type a card number or
@@ -187,7 +188,9 @@ export function paymentRefusal(input: Record<string, unknown>): string | null {
   if (action === 'submit_form' && PAYMENT_FIELD.test(sel)) {
     return 'Refused: payment form. STOP and return status "blocked" saying the site wants a card.';
   }
-  if (action === 'click' && (PAYMENT_CLICK.test(text) || PAYMENT_FIELD.test(sel))) {
+  // Clicking into a "Billing" or "Payment" settings page is fine (that's where
+  // cancel lives for web tasks); clicking a card field or a pay button is not.
+  if (action === 'click' && (PAYMENT_CLICK.test(text) || CARD_FIELD.test(sel))) {
     return 'Refused: that button pays or adds a card. STOP and return status "blocked" saying the site wants a card or deposit.';
   }
   return null;
@@ -272,6 +275,25 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMEOUT> 
 const TIMEOUT = Symbol('timeout');
 
 /**
+ * One time-boxed browser sub-agent run (shared by bookings and web tasks):
+ * takes the browser lock, opens the window the scoped browser tools check,
+ * and returns the sub-agent's final message, or null when it ran out of time.
+ * Throws on a browser error.
+ */
+export async function runBrowserSubAgent(label: string, prompt: string, timeoutMs: number): Promise<string | null> {
+  const d = deps;
+  const out = await d.withLock(label, async () => {
+    windowUntil = Date.now() + timeoutMs;
+    try {
+      return await withTimeout(d.runBrowser(prompt), timeoutMs);
+    } finally {
+      windowUntil = 0;
+    }
+  });
+  return out === TIMEOUT ? null : out;
+}
+
+/**
  * One booking attempt for actions row `actionId`: browser lock → time-boxed
  * sub-agent → parse → calendar on done → reply to the owner → finalize the row.
  * Never throws.
@@ -286,15 +308,8 @@ export async function runWebBooking(actionId: number, p: BookingPayload): Promis
     result = { status: 'failed', summary: "Chrome isn't connected on the mini." };
   } else {
     try {
-      const out = await d.withLock(`web-booking #${actionId}`, async () => {
-        windowUntil = Date.now() + d.timeoutMs;
-        try {
-          return await withTimeout(d.runBrowser(bookingPrompt(p)), d.timeoutMs);
-        } finally {
-          windowUntil = 0;
-        }
-      });
-      result = out === TIMEOUT
+      const out = await runBrowserSubAgent(`web-booking #${actionId}`, bookingPrompt(p), d.timeoutMs);
+      result = out === null
         ? { status: 'failed', summary: `Ran out of time (${Math.round(d.timeoutMs / 60_000)} min) before it was booked.` }
         : parseBookingResult(out);
     } catch (err) {

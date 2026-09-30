@@ -35,6 +35,13 @@ export function ownerAskedForCall(quote: string, context?: ToolContext): boolean
   return ownerAsked(quote, context, CALL_WORDS);
 }
 
+const WEB_TASK_WORDS = /\b(cancel|unsubscribe|export|download|close|turn off|opt out|return|refund|change|update|switch|renew|sign up|sign (me|us) up|pause|delete|remove|log ?in|online|website|site|account|settings)\b/i;
+
+/** The owner's own words asking for something done on a website (cancel, export, change a setting...). */
+export function ownerAskedForWebTask(quote: string, context?: ToolContext): boolean {
+  return ownerAsked(quote, context, WEB_TASK_WORDS);
+}
+
 /** The owner's own words asking for a booking, reservation, or appointment. */
 export function ownerAskedForBooking(quote: string, context?: ToolContext): boolean {
   return ownerAsked(quote, context, BOOKING_WORDS);

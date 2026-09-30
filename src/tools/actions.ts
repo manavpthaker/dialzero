@@ -11,6 +11,7 @@
 //   edit #action:N <change> → confirm_action({id:N, edits:{...}})
 //   cancel #action:N        → cancel_action({id:N})
 
+import { proposalText } from '../lib/proposal-text.js';
 import type { ToolDef, ToolContext } from './index.js';
 import {
   proposeAction, confirmAction, cancelAction, getAction, listPendingActions,
@@ -24,6 +25,7 @@ import { prepareSendEmail, prepareSendIMessage, runSendEmail, runSendIMessage } 
 import { callOwner, isPhoneConfigured, preparePlaceCall, runPlaceCall } from '../phone.js';
 import { prepareErrand, runErrandAction } from '../errands.js';
 import { prepareWebBooking, runWebBookingAction } from '../web-booking.js';
+import { prepareWebTask, runWebTaskAction } from '../web-task.js';
 
 type ExecutorResult = { outcome: string; outcome_url?: string; actual_cost_cents: number };
 type Executor = (action: Action) => Promise<ExecutorResult>;
@@ -53,6 +55,8 @@ const EXECUTORS: Record<string, Executor> = {
   // Online booking through the owner's Chrome (src/web-booking.ts). Starts a
   // time-boxed browser run; the result arrives later as a reply. Never pays.
   web_booking: runWebBookingAction,
+  // A website task in Chrome (src/web-task.ts): cancel, export, change a setting.
+  web_task: runWebTaskAction,
 };
 
 // Executors whose payload is validated and whose summary is written here, not by
@@ -65,6 +69,7 @@ const PREPARERS: Record<string, Preparer> = {
   place_call: (p) => preparePlaceCall(p),
   errand: (p) => prepareErrand(p),
   web_booking: (p) => prepareWebBooking(p),
+  web_task: (p) => prepareWebTask(p),
 };
 
 function usd(cents: number | null | undefined): string {
@@ -77,9 +82,9 @@ function dmFormat(a: Action): string {
   // Short enough to read on a phone. Cost and refundability only matter when
   // money moves; texts, emails, and calls are free and never undoable.
   const cost = a.estimated_cost_cents != null
-    ? ` · est. ${usd(a.estimated_cost_cents)}${a.reversible ? ', refundable' : ', not refundable'}`
+    ? ` (about ${usd(a.estimated_cost_cents)}${a.reversible ? ', refundable' : ', not refundable'})`
     : '';
-  return `#${a.id} ${a.summary}${cost}\n↩ go #action:${a.id} · cancel · or say what to change`;
+  return proposalText(a.id, a.summary, cost);
 }
 
 export const actionTools: ToolDef[] = [
@@ -91,9 +96,9 @@ export const actionTools: ToolDef[] = [
         type: 'object' as const,
         properties: {
           kind: { type: 'string', description: 'Category of action', enum: ['reorder', 'booking', 'call', 'computer_use', 'message'] },
-          tool_name: { type: 'string', description: 'Executor that will run this on confirm. "browser_reorder" places an order; "computer_use" runs a gated desktop input (click/type/key_press/scroll); "send_imessage" texts someone as the owner; "send_email" emails someone as the owner from their Gmail; "place_call" phones a business or person and works toward a goal, texting the owner the outcome after; "web_booking" books a table/appointment online in Chrome (book_online normally stages it for you). The computer_use tool normally stages those for you.', enum: ['browser_reorder', 'computer_use', 'send_imessage', 'send_email', 'place_call', 'web_booking'] },
+          tool_name: { type: 'string', description: 'Executor that will run this on confirm. "browser_reorder" places an order; "computer_use" runs a gated desktop input (click/type/key_press/scroll); "send_imessage" texts someone as the owner; "send_email" emails someone as the owner from their Gmail; "place_call" phones a business or person and works toward a goal, texting the owner the outcome after; "web_booking" books a table/appointment online in Chrome (book_online normally stages it for you); "web_task" does any other website task in Chrome, like cancelling a subscription (do_online normally stages it for you). The computer_use tool normally stages those for you.', enum: ['browser_reorder', 'computer_use', 'send_imessage', 'send_email', 'place_call', 'web_booking', 'web_task'] },
           summary: { type: 'string', description: 'One-line human-readable description, e.g. "Reorder paper towels from Amazon" or "Book a 7pm table for 4 at Joe\'s Pizza"' },
-          payload: { type: 'object', description: 'Executor args, frozen at propose time. For browser_reorder: {store, item_url, quantity, max_price_cents, optional selectors}. For send_imessage: {text, and either to (phone or email) or person (a name in people) or person_id}. For send_email: {subject, body (plain text), cc?, in_reply_to? (the RFC Message-ID header when replying), and either to (array of emails) or person or person_id}. For place_call: {goal (what the call must get done, e.g. "book a table for 4 Sat 7pm"), context? (details the caller may share, e.g. name for the booking), keep_transcript? (true only if the owner asked to keep a word-for-word record; default false = outcome only; "keep transcript" in an edit sets it true), and either to (phone number) or person or person_id}. For web_booking: {what, where, when, party_size?, share, notes?}. For send_imessage, send_email, place_call and web_booking the summary is written for you from the payload.' },
+          payload: { type: 'object', description: 'Executor args, frozen at propose time. For browser_reorder: {store, item_url, quantity, max_price_cents, optional selectors}. For send_imessage: {text, and either to (phone or email) or person (a name in people) or person_id}. For send_email: {subject, body (plain text), cc?, in_reply_to? (the RFC Message-ID header when replying), and either to (array of emails) or person or person_id}. For place_call: {goal (what the call must get done, e.g. "book a table for 4 Sat 7pm"), context? (details the caller may share, e.g. name for the booking), keep_transcript? (true only if the owner asked to keep a word-for-word record; default false = outcome only; "keep transcript" in an edit sets it true), and either to (phone number) or person or person_id}. For web_booking: {what, where, when, party_size?, share, notes?}. For web_task: {task, site, share?, notes?}. For send_imessage, send_email, place_call and web_booking the summary is written for you from the payload.' },
           estimated_cost_cents: { type: 'number', description: 'Best estimate of total cost in cents (e.g. 2418 for $24.18). Omit for a free action. The executor aborts if the live total drifts >5% from this.' },
           reversible: { type: 'boolean', description: 'Whether the action can be undone (a refundable order = true; a non-refundable booking = false). Default false.' },
           category: { type: 'string', description: 'Optional free-text category (reserved for future per-category limits).' },

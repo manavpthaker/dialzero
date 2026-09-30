@@ -23,7 +23,7 @@ const { getOwner } = await import('../src/config.js');
 const bookOnline = toolRegistry['web-booking'].find((t) => t.definition.name === 'book_online')!;
 const confirm = toolRegistry.actions.find((t) => t.definition.name === 'confirm_action')!;
 assert.ok(bookOnline && confirm, 'book_online is registered under actions');
-assert.equal(toolRegistry['booking-browser'], bookingBrowserTools);
+assert.ok(bookingBrowserTools.every((t) => toolRegistry['booking-browser'].includes(t)));
 
 // ── Stubs ───────────────────────────────────────────────────────────────────
 const told: Array<{ text: string; subject: string }> = [];
@@ -99,9 +99,8 @@ try {
     const p = wb.prepareWebBooking(base);
     assert.ok(!('error' in p));
     if ('error' in p) return;
-    assert.match(p.summary, /^🍽️ Book dinner for 4 at a good Italian place in Springfield NJ, Sat Oct 3, 7-8pm\n/);
-    assert.match(p.summary, /no card or deposit · shares Name: Alex Rivera/);
-    assert.equal(p.summary.split('\n').length, 2);
+    assert.match(p.summary, /^🍽️ Book dinner for 4 at a good Italian place in Springfield NJ, Sat Oct 3, 7-8pm\.$/);
+    assert.doesNotMatch(p.summary, /\n/);
     const err = (x: Record<string, unknown>) => { const r = wb.prepareWebBooking(x); return 'error' in r ? r.error : ''; };
     assert.match(err({ ...base, share: 'Name: Alex; card 4111 1111 1111 1111' }), /never use card/);
     assert.match(err({ ...base, share: 'Name: Alex; 4111111111111111' }), /never use card/);
@@ -166,15 +165,15 @@ try {
   await check('bot\'s own idea (or words he never said) is a proposal, and go runs it', async () => {
     const calls = browserCalls;
     const own = String(await bookOnline.handler(base, ctx));
-    assert.match(own, /^#(\d+) 🍽️ Book dinner for 4/);
-    assert.match(own, /\n↩ go #action:\d+ · cancel · or say what to change$/);
+    assert.match(own, /\n🍽️ Book dinner for 4.*\nGo\?\n/);
+    assert.doesNotMatch(own.split('(For you only')[0], /#|action/i);
     const fake = String(await bookOnline.handler({ ...base, owner_request: 'book dinner at Ferraro\'s for 6' }, ctx));
     assert.match(fake, /needs their "go"/);
     assert.equal(browserCalls, calls, 'nothing ran before go');
     const notOwner = String(await bookOnline.handler({ ...base, owner_request: 'book a table for 4 at a good Italian place' }, { ...ctx, userId: 'sam' }));
-    assert.match(notOwner, /#\d+ 🍽️/, 'only the owner skips the gate');
+    assert.match(notOwner, /Go\?/, 'only the owner skips the gate');
 
-    const id = Number(own.match(/^#(\d+)/)![1]);
+    const id = Number(own.match(/action id (\d+)/)![1]);
     assert.equal(db.getAction(id)!.status, 'proposed');
     browserReply = '{"status":"blocked","summary":"OpenTable wants a card to hold Saturday tables.","url":"https://opentable.com/x"}';
     const before = told.length;

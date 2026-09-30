@@ -64,6 +64,10 @@ async function handleAction(action, params) {
     case 'switch_tab':        return await doSwitchTab(params);
     case 'close_tab':         return await doCloseTab(params);
     case 'upload_file':       return await doUploadFile(params);
+    case 'snapshot':          return await doSnapshot(params);
+    case 'scroll':            return await doScroll(params);
+    case 'reload_extension':  setTimeout(() => chrome.runtime.reload(), 300); return { reloading: true };
+    case 'version':           return { version: chrome.runtime.getManifest().version };
     default:
       return { error: `Unknown action: ${action}` };
   }
@@ -198,32 +202,138 @@ async function doNavigate({ url, tabId, newTab }) {
 
 // ── click ──
 
-async function doClick({ selector, text, tabId }) {
-  if (!selector && !text) return { error: 'selector or text is required' };
+async function doClick({ selector, text, index, guard, tabId }) {
+  if (!selector && !text && index == null) return { error: 'selector, text, or index is required' };
   const tab = await getTab(tabId);
 
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: (sel, txt) => {
+    func: (sel, txt, idx, grd) => {
+      const visible = (e) => {
+        const r = e.getBoundingClientRect();
+        const cs = getComputedStyle(e);
+        return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none';
+      };
+      const clickableSel = 'a, button, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="row"], [role="option"], [role="checkbox"], input, select, [onclick], [tabindex], li, tr, label, summary';
       let el = null;
-      if (sel) el = document.querySelector(sel);
+      if (idx != null) el = document.querySelector(`[data-bb-idx="${idx}"]`);
+      if (!el && sel) el = document.querySelector(sel);
       if (!el && txt) {
-        const all = document.querySelectorAll('a, button, [role="button"], input[type="submit"], [onclick]');
-        for (const c of all) {
-          if (c.textContent && c.textContent.trim().toLowerCase().includes(txt.toLowerCase())) { el = c; break; }
+        const want = txt.trim().toLowerCase();
+        // 1) a real control whose text matches
+        for (const c of document.querySelectorAll('a, button, [role="button"], input[type="submit"], [onclick]')) {
+          if (visible(c) && (c.textContent || c.value || '').trim().toLowerCase().includes(want)) { el = c; break; }
+        }
+        // 2) otherwise the smallest visible element holding that text (a list row,
+        //    a div with a click handler), then its nearest clickable ancestor
+        if (!el) {
+          let best = null;
+          for (const c of document.querySelectorAll('body *')) {
+            if (c.children.length > 8) continue;
+            const t = (c.innerText || '').trim().toLowerCase();
+            if (!t.includes(want) || !visible(c)) continue;
+            if (!best || t.length < (best.innerText || '').trim().length) best = c;
+          }
+          if (best) el = best.closest(clickableSel) || best;
         }
       }
       if (!el) return { found: false };
+      // The caller's "never click this" rule (e.g. pay buttons), checked on the
+      // element actually found, so clicking by index can't slip past it.
+      const label = `${el.innerText || el.textContent || el.value || ''} ${el.getAttribute('aria-label') || ''}`;
+      if (grd && new RegExp(grd, 'i').test(label)) return { found: true, refused: true, text: label.trim().slice(0, 80) };
+      el.scrollIntoView({ block: 'center' });
+      const r = el.getBoundingClientRect();
+      const opts = { bubbles: true, cancelable: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+      // Full pointer sequence: many app frameworks ignore a bare .click().
+      el.dispatchEvent(new PointerEvent('pointerdown', opts));
+      el.dispatchEvent(new MouseEvent('mousedown', opts));
+      el.dispatchEvent(new PointerEvent('pointerup', opts));
+      el.dispatchEvent(new MouseEvent('mouseup', opts));
       el.click();
-      return { found: true, tag: el.tagName, text: el.textContent?.trim().substring(0, 100) || '' };
+      return { found: true, tag: el.tagName, text: (el.innerText || el.textContent || '').trim().substring(0, 100) };
     },
-    args: [selector || null, text || null],
+    args: [selector || null, text || null, index == null ? null : Number(index), guard || null],
   });
 
-  if (!result.found) return { error: `Element not found: ${selector || text}` };
-  await sleep(2000);
+  if (result.refused) return { error: `Refused: "${result.text}" pays or adds a card. STOP and return status "blocked" saying the site wants a card or payment.` };
+  if (!result.found) return { error: `Element not found: ${index != null ? `#${index}` : selector || text}. Try snapshot to see what's clickable.` };
+  await sleep(1500);
   const updatedTab = await chrome.tabs.get(tab.id);
   return { clicked: true, element: result.tag, elementText: result.text, currentUrl: updatedTab.url, currentTitle: updatedTab.title };
+}
+
+// ── snapshot: numbered list of what's visible and clickable ──
+
+async function doSnapshot({ tabId, limit }) {
+  const tab = await getTab(tabId);
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (max) => {
+      document.querySelectorAll('[data-bb-idx]').forEach((e) => e.removeAttribute('data-bb-idx'));
+      const sel = 'a, button, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="row"], [role="option"], [role="checkbox"], [role="switch"], [onclick], [tabindex], li, tr, summary, label';
+      const out = [];
+      let n = 0;
+      const seen = new Set();
+      const all = Array.from(document.querySelectorAll(sel)).concat(
+        Array.from(document.querySelectorAll('div, span')).filter((e) => getComputedStyle(e).cursor === 'pointer'));
+      for (const e of all) {
+        if (seen.has(e)) continue;
+        seen.add(e);
+        const r = e.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > innerHeight * 3) continue;
+        const cs = getComputedStyle(e);
+        if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+        const label = (e.getAttribute('aria-label') || e.innerText || e.value || e.placeholder || e.title || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+        if (!label && !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.tagName)) continue;
+        e.setAttribute('data-bb-idx', String(n));
+        const kind = (e.getAttribute('role') || e.tagName.toLowerCase()) + (e.type ? `:${e.type}` : '');
+        out.push(`[${n}] ${kind} "${label}"${r.top > innerHeight ? ' (below)' : ''}`);
+        n++;
+        if (n >= max) break;
+      }
+      const se = document.scrollingElement;
+      return {
+        url: location.href, title: document.title, count: n,
+        scroll: se ? `${Math.round(se.scrollTop)}/${Math.round(se.scrollHeight - se.clientHeight)}` : '',
+        items: out.join('\n'),
+      };
+    },
+    args: [Math.min(Number(limit) || 150, 400)],
+  });
+  return result;
+}
+
+// ── scroll: the page, or the biggest scrollable list on it ──
+
+async function doScroll({ direction, amount, selector, tabId }) {
+  const tab = await getTab(tabId);
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (dir, amt, sel) => {
+      let box = sel ? document.querySelector(sel) : null;
+      if (!box) {
+        // Long lists in web apps usually scroll inside a container, not the page.
+        let best = null;
+        for (const e of document.querySelectorAll('body *')) {
+          if (e.scrollHeight - e.clientHeight > 50 && /(auto|scroll)/.test(getComputedStyle(e).overflowY)) {
+            if (!best || e.clientHeight * e.clientWidth > best.clientHeight * best.clientWidth) best = e;
+          }
+        }
+        const page = document.scrollingElement;
+        box = best && (!page || best.scrollHeight - best.clientHeight > page.scrollHeight - page.clientHeight) ? best : page;
+      }
+      const step = (amt || 1) * box.clientHeight * 0.9;
+      const before = box.scrollTop;
+      if (dir === 'top') box.scrollTop = 0;
+      else if (dir === 'bottom') box.scrollTop = box.scrollHeight;
+      else box.scrollTop += dir === 'up' ? -step : step;
+      return { scrolled: Math.round(box.scrollTop - before), position: Math.round(box.scrollTop), max: Math.round(box.scrollHeight - box.clientHeight), atEnd: box.scrollTop + box.clientHeight >= box.scrollHeight - 2 };
+    },
+    args: [direction || 'down', Number(amount) || 1, selector || null],
+  });
+  await sleep(800);
+  return result;
 }
 
 // ── extract_text ──

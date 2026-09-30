@@ -21,8 +21,9 @@ It's not an app you open. It's a contact in your phone.
 | "Tell Sam I'm running 10 late" | Texts Sam for you, as you. |
 | "Email the landlord about the leak" | Writes and sends the email from your Gmail. |
 | "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. |
-| "Cancel my gym membership" | Calls them (or emails, or uses their site in your browser with your OK), asks to cancel, and tells you what they said. It won't accept a retention offer or a fee, and if they want a PIN or card digits, it asks you instead. |
+| "Cancel my gym membership" | Does it on their website in your signed-in Chrome, turning down every offer to stay, or calls them if it has to. It keeps at it until it's done and texts you the result. It never pays, and if they want a login, a PIN or card digits, it asks you. |
 | "Book a table for 4 Saturday at 7" | Books it online (never enters a card), or calls if it can't. |
+| "Download all my recordings from that app, then cancel it" | Works through the site one step at a time, checks the files landed in Downloads, and only cancels once the export is done. |
 | "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
 | "Hey Siri, ask Milo what's next" (whatever you named it) | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
 | A voice memo | Transcribes it and files away what matters. |
