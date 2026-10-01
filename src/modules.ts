@@ -404,6 +404,7 @@ export const MODULES: ModuleSpec[] = [
     tools: ['actions', 'followup-tools'],
     start: ['followups'],
     env: [
+      { key: 'PROGRESS_UPDATES', example: 'false', description: 'true = text a progress line for every step while it works (noisy; off by default).' },
       { key: 'ACTIONS_ENABLED', example: 'true', featureSwitch: { defaultOn: true }, description: 'false = the assistant cannot propose or carry out any action.' },
       { key: 'ACTIONS_DAILY_CAP_USD', example: '100', description: 'Most real money actions may spend per day.' },
       { key: 'ACTIONS_WEEKLY_CAP_USD', example: '400', description: 'Most real money actions may spend per week.' },

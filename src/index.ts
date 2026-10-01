@@ -175,7 +175,9 @@ async function main() {
     if (!isFamily) await sendMessage(remoteJid, RECEIVED_ACK);
 
     // Progress callback — sends tool-by-tool updates to the chat
-    const onProgress = isFamily ? undefined : async (msg: string) => {
+    // Tool-by-tool progress texts are off by default: the owner gets the receipt,
+    // then the answer. PROGRESS_UPDATES=true turns them back on.
+    const onProgress = isFamily || process.env.PROGRESS_UPDATES !== 'true' ? undefined : async (msg: string) => {
       await sendMessage(remoteJid, msg);
     };
 
