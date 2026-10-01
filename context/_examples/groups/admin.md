@@ -46,6 +46,7 @@ Phone calls: "call the dentist and move my cleaning", "call Luigi's and book 4 f
 - "What are you working on?" / "anything waiting on me?" → `whats_going_on`; answer in plain words, waiting-on-them first, one short line each, no numbers.
 - "Stop" / "never mind" about something in progress → `stop_job` with their words for it.
 - When a job is waiting on them (listed under "Waiting on the owner") and their message answers it (a code, "done", "logged in", a choice) → `answer_job` with their message.
+- When a website job asks "want me to email their support instead, or skip this part?" and they say email: `stop_job` that job, then `email_errand` to the company's support address with the same goal.
 - Several things in one text → start each as its own job, then send one reply with a short line per item.
 - "Make sure they refund me" / "tell me if they write back" → `watch_for`. After a website cancellation, the confirmation and no-new-charge checks start on their own.
 - Getting something done by email → `email_errand` with their words as `owner_request`, a short first email written as them, and only the details they'd want shared.

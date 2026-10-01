@@ -191,6 +191,16 @@ const OWNER_NEEDED = /\b(log ?in|sign ?in|password|passcode|verification code|on
 export function needsOwner(summary: string): boolean { return OWNER_NEEDED.test(summary); }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const wordsOf = (t: string) => new Set(t.toLowerCase().replace(/^run \d+ \([^)]*\): /, '').split(/[^a-z]+/).filter((w) => w.length >= 4));
+/** The last three runs failed for what reads like the same reason. */
+export function sameWall(progress: string[]): boolean {
+  const fails = progress.filter((x) => /\(didn't work\)/.test(x)).slice(-3);
+  if (fails.length < 3 || !progress.slice(-3).every((x) => /\(didn't work\)/.test(x))) return false;
+  const sets = fails.map(wordsOf);
+  const sim = (a: Set<string>, b: Set<string>) => { const inter = [...a].filter((w) => b.has(w)).length; return inter / Math.max(1, Math.min(a.size, b.size)); };
+  return sim(sets[0], sets[1]) >= 0.5 && sim(sets[1], sets[2]) >= 0.5;
+}
+
 /**
  * Works one web task to the end: run after run in the browser until it's done,
  * blocked on the owner, or out of tries. Progress survives restarts (memory
@@ -273,6 +283,15 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
       if (result.status === 'done' || result.status === 'blocked') break;
       if (result.status === 'in_progress') setJobProgress(jobId, result.summary);
       st.progress = [...st.progress, `Run ${st.runs} (${result.status === 'in_progress' ? 'progress' : "didn't work"}): ${result.summary}`].slice(-10);
+      // The same wall three runs in a row: more runs won't change it. Stop
+      // and ask him, with the routes left (email them, do it himself, skip it).
+      if (result.status === 'failed' && sameWall(st.progress)) {
+        const ask = `${p.site.replace(/^https?:\/\//, '').replace(/\/.*$/, '')} keeps hitting the same wall: ${result.summary.replace(/\s*\(Not actually blocked[^)]*\)/, '')} Want me to email their support instead, or skip this part?`;
+        waitOnOwner(jobId, 'decision', ask);
+        saveState(actionId, st);
+        try { await d.notify(ask, `web-task:${actionId}:ask`); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
+        return { ...result, status: 'needs_owner', need: 'decision', ask };
+      }
       // Real progress continues right away; a failure waits a few minutes first.
       st.nextAt = Date.now() + (result.status === 'in_progress' ? 0 : RETRY_GAP_MS());
       saveState(actionId, st);

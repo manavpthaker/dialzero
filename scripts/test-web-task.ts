@@ -163,6 +163,33 @@ try {
     assert.equal(db.getAction(id)!.status, 'done');
   });
 
+  await check('the same wall three runs in a row: stops and asks him instead of grinding', async () => {
+    const wall = (n: number) => `{"status":"failed","summary":"Plaud's web UI only exposes share links (try ${n}), not transcript export; nothing exported."}`;
+    const replies = [wall(1), wall(2), wall(3), doneJson];
+    let runs = 0;
+    wb.setBookingDeps({
+      isConnected: () => true,
+      runBrowser: async () => { runs++; return replies.shift()!; },
+      notify: async (text, subject) => { told.push({ text, subject }); },
+      withLock: async (_l, fn) => fn(),
+      timeoutMs: 2000,
+    });
+    const { id, done } = wt.startWebTask(base as never, 'x', 'admin');
+    const r = await done;
+    assert.equal(runs, 3, 'stopped after the third identical failure');
+    assert.equal(r.status, 'needs_owner');
+    assert.equal(db.getAction(id)!.status, 'executing', 'paused, not failed');
+    assert.match(told.at(-1)!.text, /keeps hitting the same wall.*email their support instead, or skip this part\?/);
+    assert.ok(!wt.sameWall(['Run 1 (didn\'t work): login page empty', 'Run 2 (didn\'t work): export button greyed out', 'Run 3 (didn\'t work): wrong account selected']));
+    wb.setBookingDeps({
+      isConnected: () => connected,
+      runBrowser: async (prompt) => { lastPrompt = prompt; return browserReply; },
+      notify: async (text, subject) => { told.push({ text, subject }); },
+      withLock: async (_l, fn) => fn(),
+      timeoutMs: 2000,
+    });
+  });
+
   await check('Chrome down: refuses up front', async () => {
     connected = false;
     assert.match(String(await doOnline.handler({ ...base, owner_request: 'cancel Plaud' }, ctx)), /isn't connected/);
