@@ -64,6 +64,8 @@ export interface AgentRuntimeOverrides {
    * acceptance tests. Production never supplies this. */
   createResponse?: typeof createOpenAIResponse;
   turnId?: string;
+  /** More tool turns for long sub-agent runs (browser jobs). Default MAX_TURNS. */
+  maxTurns?: number;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -730,7 +732,8 @@ export async function runAgent(
   let response: string = '';
   let lastProgressTime = 0;
 
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
+  const maxTurns = Math.max(2, runtimeOverrides?.maxTurns ?? MAX_TURNS);
+  for (let turn = 0; turn < maxTurns; turn++) {
     let result: Awaited<ReturnType<typeof createOpenAIResponse>>;
     try {
       result = await createResponse({
@@ -1004,7 +1007,7 @@ export async function runAgent(
     }
 
     // On the second-to-last turn, force a final text response (no more tools).
-    if (turn === MAX_TURNS - 2) {
+    if (turn === maxTurns - 2) {
       toolDefs.length = 0;
     }
   }

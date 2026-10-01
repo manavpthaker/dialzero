@@ -66,6 +66,11 @@ Actions:
 - navigate: Go to a URL, returns page title + text
 - snapshot: A numbered list of everything visible and clickable on the page ([12] row "Sep 24 meeting"). Use it whenever you don't know what to click, then click by index.
 - click: Click an element by index (from snapshot, most reliable), CSS selector, or text (matches buttons, links, list rows, anything showing that text)
+- screenshot: See the page as an image. Use it when snapshot/extract_text don't explain what's on screen (a popup, a confirmation step, a canvas, an odd layout). Coordinates in the image are page coordinates for click_at.
+- click_at: Click whatever is at x,y in the last screenshot (works inside embedded frames and popups). Use when there's no snapshot index for it.
+- real_click: A REAL mouse click (index from snapshot, or x,y from screenshot). Use only when click/click_at did nothing: some pages ignore scripted clicks. Chrome shows a "being controlled" bar on the tab while it's used.
+- real_type: Type value with the real keyboard into whatever has focus (real_click the field first). For fields that ignore fill_input.
+- real_key: Press a real key: enter, tab, escape, backspace, space, arrowdown, arrowup.
 - scroll: Scroll down/up/top/bottom (amount = screens, default 1). Scrolls the page's main list if it has one. Long lists load more as you scroll; snapshot again after.
 - extract_text: Extract text from elements by CSS selector
 - get_page_source: Get raw HTML (truncated to 50k chars)
@@ -87,7 +92,7 @@ Logins: if the owner's password manager fills a login page, click its sign-in bu
             enum: [
               'navigate', 'click', 'extract_text', 'get_page_source',
               'fill_input', 'type_editor', 'submit_form', 'wait_for_selector',
-              'get_current_url', 'list_tabs', 'switch_tab', 'upload_file', 'snapshot', 'scroll',
+              'get_current_url', 'list_tabs', 'switch_tab', 'upload_file', 'snapshot', 'scroll', 'screenshot', 'click_at', 'real_click', 'real_type', 'real_key',
             ],
             description: 'The browser action to perform',
           },
@@ -95,6 +100,9 @@ Logins: if the owner's password manager fills a login page, click its sign-in bu
           selector: { type: 'string', description: 'CSS selector (for click, extract_text, fill_input, type_editor, submit_form, wait_for_selector, upload_file)' },
           text: { type: 'string', description: 'Text content to find element by (for click action, alternative to selector)' },
           index: { type: 'number', description: 'Element number from the last snapshot (for click)' },
+          x: { type: 'number', description: 'For click_at: x in the last screenshot' },
+          y: { type: 'number', description: 'For click_at: y in the last screenshot' },
+          key: { type: 'string', description: 'For real_key: enter, tab, escape, backspace, space, arrowdown, arrowup' },
           direction: { type: 'string', enum: ['down', 'up', 'top', 'bottom'], description: 'For scroll' },
           amount: { type: 'number', description: 'Screens to scroll (for scroll, default 1)' },
           value: { type: 'string', description: 'Value to fill (for fill_input) or type (for type_editor)' },
@@ -163,6 +171,16 @@ Logins: if the owner's password manager fills a login page, click its sign-in bu
             sessionTabs.set(groupKey, r.tabId as number);
           }
 
+          // The page opened a pop-up or new tab (e.g. "Manage billing" → Stripe):
+          // follow it, so the next action works where the page went.
+          const opened = r.openedTab as { tabId?: number; url?: string; title?: string } | undefined;
+          if (opened && typeof opened.tabId === 'number') {
+            sessionTabs.set(groupKey, opened.tabId);
+            delete r.openedTab;
+            const note = `A new window opened (${opened.title || opened.url || 'untitled'}${opened.url ? ` — ${opened.url.split('?')[0]}` : ''}). You're now working in it; take a snapshot.`;
+            return `${note}\n\n${JSON.stringify(result, null, 2)}`;
+          }
+
           // Format navigate results nicely
           if (action === 'navigate' && r.title) {
             const text = r.text as string || '';
@@ -186,6 +204,12 @@ Logins: if the owner's password manager fills a login page, click its sign-in bu
             return `${r.html}${note}`;
           }
 
+          if (action === 'screenshot' && typeof r.base64 === 'string') {
+            return [
+              { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: r.base64 } },
+              { type: 'text', text: `Screenshot of the page (${r.width}×${r.height}; click_at uses these coordinates).` },
+            ] as unknown as string;
+          }
           if (action === 'snapshot' && typeof r.items === 'string') {
             return `${r.title}\n${r.url}\nScroll: ${r.scroll || 'n/a'} · ${r.count} clickable\n\n${r.items || '(nothing clickable found)'}`;
           }

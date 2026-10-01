@@ -14,11 +14,13 @@ process.env.WEB_TASK_RETRY_GAP_MS = '10';
 const db = await import('../src/db.js');
 const wb = await import('../src/web-booking.js');
 const wt = await import('../src/web-task.js');
+wt.setWebTaskCodeLookup(async () => null); // never touch real email/texts in tests
+wt.setWebTaskEmailLookup(async () => null);
 const jobs = await import('../src/jobs.js');
 const { toolRegistry } = await import('../src/tools/index.js');
 const { getOwner } = await import('../src/config.js');
 
-const tool = (key: string, name: string) => toolRegistry[key].find((t) => t.definition.name === name)!;
+const tool = (key: string, name: string) => (toolRegistry[key].find((t) => t.definition.name === name) ?? Object.values(toolRegistry).flat().find((t) => t.definition.name === name))!;
 const whats = tool('actions', 'whats_going_on');
 const stop = tool('actions', 'stop_job');
 const answer = tool('actions', 'answer_job');
@@ -170,6 +172,100 @@ try {
     assert.match(prefs, /exports: transcripts, not audio/);
     assert.match(prefs, /cancellations: always turn down offers to stay/);
     assert.match(wt.webTaskPrompt(base as never), /HOW THEY LIKE THINGS DONE[\s\S]*transcripts, not audio/);
+  });
+
+  await check('asking again about a job already running or waiting does not start a second one', async () => {
+    const doOnline = tool('actions', 'do_online');
+    const id = db.insertJob({ title: 'Cancel the Hulu subscription.', kind: 'web_task', status: 'working' });
+    const ctx2 = { groupKey: 'admin', userId: OWNER, currentMessage: 'cancel hulu anyway' };
+    const before = db.listOpenJobRows().length;
+    const out = String(await doOnline.handler({ owner_request: 'cancel hulu anyway', task: 'cancel the Hulu subscription', site: 'https://www.hulu.com' }, ctx2));
+    assert.match(out, /Already working on that/);
+    assert.equal(db.listOpenJobRows().length, before);
+    db.patchJob(id, { status: 'waiting_on_you', waiting_for: 'decision', ask: 'Hulu offers 50% off. Take it?' });
+    const out2 = String(await doOnline.handler({ owner_request: 'cancel hulu anyway', task: 'cancel the Hulu subscription', site: 'https://www.hulu.com' }, ctx2));
+    assert.match(out2, /Back on it/);
+    assert.equal(db.getJob(id)!.answer, 'cancel hulu anyway');
+  });
+
+  await check('a code the site emailed them is fetched and typed without asking them', async () => {
+    const cf = await import('../src/lib/code-finder.js');
+    const linkedin = `Search results\n────────────────────────────\n\n  ID: 190575\n  Subject: Here's your verification code 415836\n  From: LinkedIn <security-noreply@linkedin.com>\n  Date: 2099-01-01 10:00\n\n  [Enter the 6-digit code below](https://x.com/a)\n  # ** [415836](https://x.com/b)**\n`;
+    assert.deepEqual(cf.parseSparkResults(linkedin).map((m) => m.id), ['190575']);
+    assert.equal(cf.codeFromText("Here's your verification code 415836", ''), '415836');
+    assert.equal(cf.codeFromText('Your PLAUD sign-in code', 'Use this code: 482913 to sign in. © 2026 Plaud'), '482913');
+    assert.equal(cf.codeFromText('Order shipped', 'Arrives 2026-10-03'), null);
+    cf.setCodeFinderDeps({ searchEmail: async () => linkedin.replace(/LinkedIn/g, 'Plaud'), ownerHandles: () => [] });
+    assert.equal((await cf.findEmailCode(['plaud'], Date.parse('2099-01-01T09:58')))?.code, '415836');
+    assert.equal(await cf.findEmailCode(['netflix'], Date.parse('2099-01-01T09:58')), null, 'another company\'s code is ignored');
+    assert.equal(await cf.findEmailCode(['plaud'], Date.parse('2099-01-01T11:00')), null, 'an old code is ignored');
+
+    wt.setWebTaskCodeLookup(async (brands) => (brands.includes('plaud') ? { code: '777111', source: 'email' } : null));
+    const typed: string[] = [];
+    const before = told.length;
+    replies = [
+      '{"status":"needs_owner","need":"code","ask":"Plaud sent you a code. What is it?","summary":"code screen"}',
+      '{"status":"done","summary":"Signed in and cancelled."}',
+    ];
+    onRun = async (prompt) => {
+      if (!/THE OWNER SENT THE CODE/.test(prompt)) return;
+      assert.doesNotMatch(prompt, /777111/);
+      const { browserTools } = await import('../src/tools/browser.js');
+      const orig = browserTools[0].handler;
+      browserTools[0].handler = async (input) => {
+        if (input.action === 'get_current_url') return JSON.stringify({ url: `https://${pageHost}/login` });
+        if (input.action === 'fill_input') { typed.push(String(input.value)); return '{"filled":true}'; }
+        return orig(input);
+      };
+      try { await enterCode.handler({ selector: '#otp' }, ctx); } finally { browserTools[0].handler = orig; }
+    };
+    const { id, done } = wt.startWebTask(base as never, 'Cancel Plaud.', 'admin');
+    const r = await done;
+    onRun = null;
+    wt.setWebTaskCodeLookup(async () => null);
+    assert.equal(r.status, 'done');
+    assert.deepEqual(typed, ['777111']);
+    assert.equal(told.length - before, 1, 'only the final result was texted, no "what is the code?"');
+    assert.equal(db.getAction(id)!.status, 'done');
+  });
+
+  await check('an emailed sign-in link (Stripe-style) is found, opened in the job tab, and kept out of the prompt', async () => {
+    const cf = await import('../src/lib/code-finder.js');
+    const stripe = `Results\n────────────────────────────\n\n  ID: 9\n  Subject: Sign in to Plaud's billing portal\n  From: Plaud <receipts+abc@stripe.com>\n  To: Alex <m@example.com>\n  Date: 2099-01-01 10:00\n\n  [Unsubscribe](https://stripe.com/unsub)\n  [Sign in](https://billing.stripe.com/p/session/login_SECRET123)\n`;
+    assert.equal(cf.signInLinkFrom(cf.parseSparkResults(stripe)[0].body, ['plaud'])?.host, 'billing.stripe.com');
+    assert.equal(cf.signInLinkFrom('[Sign in](https://evil.example.com/login)', ['plaud']), null, 'unknown hosts are ignored');
+    cf.setCodeFinderDeps({ searchEmail: async () => stripe, ownerHandles: () => [] });
+    assert.equal((await cf.findEmailLink(['plaud'], Date.parse('2099-01-01T09:59')))?.link, 'https://billing.stripe.com/p/session/login_SECRET123');
+    assert.equal(await cf.findAccountEmail(['plaud']), 'm@example.com', 'the address Plaud emails them at');
+
+    wt.setWebTaskCodeLookup(async () => ({ link: 'https://billing.stripe.com/p/session/login_SECRET123' }));
+    const opened: string[] = [];
+    replies = [
+      '{"status":"needs_owner","need":"link","ask":"Stripe emailed you a link.","summary":"link sent"}',
+      '{"status":"done","summary":"Cancelled in the Stripe portal."}',
+    ];
+    const before = told.length;
+    onRun = async (prompt) => {
+      if (!/THE SIGN-IN LINK ARRIVED/.test(prompt)) return;
+      assert.doesNotMatch(prompt, /SECRET123/);
+      const { browserTools } = await import('../src/tools/browser.js');
+      const orig = browserTools[0].handler;
+      browserTools[0].handler = async (input) => {
+        if (input.action === 'navigate') { opened.push(String(input.url)); return 'Title: Billing\nURL: https://billing.stripe.com/p/session/xyz\n\nManage subscription'; }
+        return orig(input);
+      };
+      try {
+        const out = String(await tool('booking-browser', 'open_sign_in_link').handler({}, ctx));
+        assert.doesNotMatch(out, /SECRET|billing\.stripe\.com\/p/, 'token never reaches the model');
+        assert.match(String(await tool('booking-browser', 'open_sign_in_link').handler({}, ctx)), /No sign-in link/, 'single use');
+      } finally { browserTools[0].handler = orig; }
+    };
+    const { done } = wt.startWebTask({ task: 'cancel Plaud', site: 'https://web.plaud.ai' } as never, 'Cancel Plaud.', 'admin');
+    assert.equal((await done).status, 'done');
+    onRun = null;
+    wt.setWebTaskCodeLookup(async () => null);
+    assert.deepEqual(opened, ['https://billing.stripe.com/p/session/login_SECRET123']);
+    assert.equal(told.length - before, 1, 'no "click the link" text to them');
   });
 
   console.log(`\nJob tracker tests passed: ${passed} checks.`);

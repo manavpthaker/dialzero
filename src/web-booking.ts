@@ -174,7 +174,7 @@ export function bookingWindowOpen(now = Date.now()): boolean {
   return now < windowUntil;
 }
 
-const PAYMENT_FIELD = /card|cc-?(num|number|exp|csc)|cvv|cvc|security.?code|expir|payment|billing|iban|routing/i;
+export const PAYMENT_FIELD = /card|cc-?(num|number|exp|csc)|cvv|cvc|security.?code|expir|payment|billing|iban|routing/i;
 const CARD_FIELD = /card|cc-?(num|number|exp|csc)|cvv|cvc|security.?code|expir|iban|routing/i;
 export const PAYMENT_CLICK = /\b(pay|purchase|buy now|place order|add (a )?card|save card|add payment|checkout)\b/i;
 
@@ -191,6 +191,9 @@ export function paymentRefusal(input: Record<string, unknown>): string | null {
   if ((action === 'fill_input' || action === 'type_editor') && (PAYMENT_FIELD.test(sel) || looksLikeCardNumber(val))) {
     return 'Refused: this is a card/payment field. Bookings never enter payment details. STOP and return status "blocked" saying the site wants a card.';
   }
+  if (action === 'real_type' && looksLikeCardNumber(val)) {
+    return 'Refused: that looks like a card number. Bookings never enter payment details. STOP and return status "blocked" saying the site wants a card.';
+  }
   if (action === 'submit_form' && PAYMENT_FIELD.test(sel)) {
     return 'Refused: payment form. STOP and return status "blocked" saying the site wants a card.';
   }
@@ -203,6 +206,8 @@ export function paymentRefusal(input: Record<string, unknown>): string | null {
 }
 
 // ── Runner ──────────────────────────────────────────────────────────────────
+
+const BROWSER_MAX_TURNS = parseNumEnv('BROWSER_MAX_TURNS', 40);
 
 export const BOOKING_GROUP: GroupConfig = {
   key: 'booking',
@@ -227,7 +232,8 @@ const defaultDeps: BookingDeps = {
     // Dynamic: agent.ts → tools/index.ts → tools/web-booking.ts → here is a cycle.
     const { runAgent } = await import('./agent.js');
     const { getSystemUser } = await import('./lib/system-user.js');
-    return runAgent(BOOKING_GROUP, getSystemUser(), prompt);
+    // Browser jobs take many small steps (snapshot, click, screenshot...).
+    return runAgent(BOOKING_GROUP, getSystemUser(), prompt, undefined, undefined, undefined, undefined, undefined, undefined, { maxTurns: BROWSER_MAX_TURNS });
   },
   // Dynamic imports keep this module out of the tools/index.ts import cycle.
   createEvent: async (opts) => (await import('./tools/calendar.js')).createCalendarEventRaw(opts),

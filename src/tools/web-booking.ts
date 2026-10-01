@@ -10,7 +10,7 @@ import { ownerAskedForBooking } from '../lib/owner-request.js';
 import { browserTools } from './browser.js';
 import {
   prepareWebBooking, startWebBooking, bookingDeps, bookingWindowOpen, paymentRefusal,
-  NOT_CONNECTED, PAYMENT_CLICK, type BookingPayload,
+  NOT_CONNECTED, PAYMENT_CLICK, PAYMENT_FIELD, type BookingPayload,
 } from '../web-booking.js';
 
 function dmFormat(id: number, summary: string): string {
@@ -80,7 +80,9 @@ export const bookingBrowserTools: ToolDef[] = browserTools
       if (refusal) return refusal;
       // Clicks carry the pay-button rule into Chrome, where the real element's
       // label is checked (a click by snapshot index has no text to check here).
-      const guarded = input.action === 'click' ? { ...input, guard: PAYMENT_CLICK.source } : input;
+      const guarded = input.action === 'click' || input.action === 'click_at' || input.action === 'real_click'
+        ? { ...input, guard: PAYMENT_CLICK.source }
+        : input.action === 'real_type' ? { ...input, fieldGuard: PAYMENT_FIELD.source } : input;
       return t.handler(guarded, { ...(context ?? { groupKey: 'booking' }), groupKey: 'booking' });
     },
   }));

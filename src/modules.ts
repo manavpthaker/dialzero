@@ -467,6 +467,7 @@ export const MODULES: ModuleSpec[] = [
       { key: 'BOOKING_TIMEOUT_MS', description: 'Time limit for one online booking.' },
       { key: 'WEB_TASK_TIMEOUT_MS', example: '1800000', description: 'Time limit for one browser run of a website job (it keeps going run after run).' },
       { key: 'WEB_TASK_MAX_RUNS', example: '20', description: 'Browser runs a website job may take before it gives up and texts you.' },
+      { key: 'BROWSER_MAX_TURNS', example: '40', description: 'Steps one browser run may take (clicks, snapshots, screenshots) before it reports.' },
       { key: 'DOWNLOADS_DIR', description: 'Where Chrome saves downloads, so website jobs can confirm an export landed. Default ~/Downloads.' },
       { key: 'WEB_TASK_RETRY_GAP_MS', example: '180000', description: 'Wait after a run that did not work, before trying another way.' },
       { key: 'ACTIONS_REORDER_DRY_RUN', example: 'false', description: 'true = stop before the final "place order" click (practice mode).' },

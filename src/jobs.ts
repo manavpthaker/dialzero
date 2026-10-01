@@ -15,7 +15,7 @@ import {
   type JobRow, type ErrandRow,
 } from './db.js';
 
-export type WaitNeed = 'login' | 'code' | 'decision' | 'info';
+export type WaitNeed = 'login' | 'code' | 'link' | 'decision' | 'info';
 export type ItemStatus = 'waiting_on_you' | 'working' | 'watching';
 
 const CODE_TTL_MS = 10 * 60_000;
@@ -72,10 +72,19 @@ export function takeCode(jobId: number): string | null {
   return j.answer;
 }
 
+/** The emailed sign-in link for a job, once, within 10 minutes (opened by open_sign_in_link). */
+export function takeLink(jobId: number): string | null {
+  const j = getJob(jobId);
+  if (!j?.answer || j.waiting_for !== 'link' || !j.answered_at) return null;
+  patchJob(jobId, { answer: null });
+  if (Date.now() - Date.parse(j.answered_at) > CODE_TTL_MS) return null;
+  return j.answer;
+}
+
 /** A non-code answer for the next run's prompt, once. */
 export function takeAnswer(jobId: number): { ask: string; answer: string; need: string } | null {
   const j = getJob(jobId);
-  if (!j?.answer || j.waiting_for === 'code') return null;
+  if (!j?.answer || j.waiting_for === 'code' || j.waiting_for === 'link') return null;
   patchJob(jobId, { answer: null });
   return { ask: j.ask ?? '', answer: j.answer, need: j.waiting_for ?? 'info' };
 }
@@ -195,6 +204,11 @@ export async function answerItem(whichText: string, answer: string): Promise<str
     const code = extractCode(answer);
     if (!code) return 'That job is waiting for a code, and their message has none. Ask them for the code in one line.';
     stored = code;
+  }
+  if (job.waiting_for === 'link') {
+    const link = answer.match(/https:\/\/[^\s<>"]+/)?.[0];
+    if (!link) return 'That job is waiting for the sign-in link, and their message has none. Ask them to forward the email or paste the link.';
+    stored = link;
   }
   patchJob(id, { answer: stored, answered_at: new Date().toISOString(), status: 'working' });
   const resume = hooks[job.kind]?.resume;

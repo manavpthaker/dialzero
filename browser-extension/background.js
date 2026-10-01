@@ -33,9 +33,42 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // ── Message relay: offscreen doc sends commands here, we execute & reply ──
 
+// Pop-ups and new tabs a page opens (window.open, target=_blank), keyed by the
+// tab that opened them, so a job can follow a "Manage billing" pop-up to
+// Stripe instead of staring at the page it left.
+const openedBy = new Map(); // sourceTabId -> [{ tabId, url, at }]
+chrome.webNavigation.onCreatedNavigationTarget.addListener((d) => {
+  const list = openedBy.get(d.sourceTabId) || [];
+  list.push({ tabId: d.tabId, url: d.url, at: Date.now() });
+  openedBy.set(d.sourceTabId, list.slice(-5));
+});
+
+/** A tab the given tab opened since it was last asked, if any (reported once). */
+async function takeOpenedTab(tabId) {
+  const list = openedBy.get(tabId);
+  if (!list || !list.length) return null;
+  openedBy.delete(tabId);
+  const last = list[list.length - 1];
+  try {
+    const t = await chrome.tabs.get(last.tabId);
+    return { tabId: t.id, url: t.url || last.url, title: t.title || '' };
+  } catch {
+    return null; // already closed
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'bridge_command') {
     handleAction(msg.action, msg.params || {})
+      .then(async (result) => {
+        // Tell the caller about a pop-up/new tab this tab just opened.
+        const src = msg.params && msg.params.tabId;
+        if (src && result && typeof result === 'object' && !Array.isArray(result)) {
+          const opened = await takeOpenedTab(src);
+          if (opened) result.openedTab = opened;
+        }
+        return result;
+      })
       .then(result => sendResponse({ id: msg.id, result }))
       .catch(err => sendResponse({ id: msg.id, result: { error: err.message || String(err) } }));
     return true; // keep channel open for async response
@@ -66,6 +99,11 @@ async function handleAction(action, params) {
     case 'upload_file':       return await doUploadFile(params);
     case 'snapshot':          return await doSnapshot(params);
     case 'scroll':            return await doScroll(params);
+    case 'screenshot':        return await doScreenshot(params);
+    case 'click_at':          return await doClickAt(params);
+    case 'real_click':        return await doRealClick(params);
+    case 'real_type':         return await doRealType(params);
+    case 'real_key':          return await doRealKey(params);
     case 'reload_extension':  setTimeout(() => chrome.runtime.reload(), 300); return { reloading: true };
     case 'version':           return { version: chrome.runtime.getManifest().version };
     default:
@@ -205,6 +243,10 @@ async function doNavigate({ url, tabId, newTab }) {
 async function doClick({ selector, text, index, guard, tabId }) {
   if (!selector && !text && index == null) return { error: 'selector, text, or index is required' };
   const tab = await getTab(tabId);
+  if (index != null && snapshotMaps.has(tab.id)) {
+    const r = await clickSnapshotIndex(tab, index, guard);
+    if (r) return finishClick(tab, r, `#${index}`);
+  }
 
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -265,21 +307,32 @@ async function doClick({ selector, text, index, guard, tabId }) {
 
 // ── snapshot: numbered list of what's visible and clickable ──
 
+// Per tab: snapshot index → { frameId, local } so clicks reach elements inside
+// embedded frames (billing portals, consent dialogs) and shadow DOM too.
+const snapshotMaps = new Map();
+
 async function doSnapshot({ tabId, limit }) {
   const tab = await getTab(tabId);
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
+  const max = Math.min(Number(limit) || 150, 400);
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, allFrames: true },
     func: (max) => {
-      document.querySelectorAll('[data-bb-idx]').forEach((e) => e.removeAttribute('data-bb-idx'));
-      const sel = 'a, button, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="row"], [role="option"], [role="checkbox"], [role="switch"], [onclick], [tabindex], li, tr, summary, label';
+      // Walk the page including open shadow roots (many modals live in one).
+      const all = [];
+      const walk = (root) => {
+        for (const e of root.querySelectorAll('*')) {
+          all.push(e);
+          if (e.shadowRoot) walk(e.shadowRoot);
+        }
+      };
+      walk(document);
+      all.forEach((e) => e.removeAttribute && e.removeAttribute('data-bb-idx'));
+      const clickable = (e) => e.matches('a, button, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="row"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [onclick], [tabindex], li, tr, summary, label')
+        || ((e.tagName === 'DIV' || e.tagName === 'SPAN') && getComputedStyle(e).cursor === 'pointer');
       const out = [];
       let n = 0;
-      const seen = new Set();
-      const all = Array.from(document.querySelectorAll(sel)).concat(
-        Array.from(document.querySelectorAll('div, span')).filter((e) => getComputedStyle(e).cursor === 'pointer'));
       for (const e of all) {
-        if (seen.has(e)) continue;
-        seen.add(e);
+        if (!(e instanceof HTMLElement) || !clickable(e)) continue;
         const r = e.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > innerHeight * 3) continue;
         const cs = getComputedStyle(e);
@@ -288,20 +341,297 @@ async function doSnapshot({ tabId, limit }) {
         if (!label && !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.tagName)) continue;
         e.setAttribute('data-bb-idx', String(n));
         const kind = (e.getAttribute('role') || e.tagName.toLowerCase()) + (e.type ? `:${e.type}` : '');
-        out.push(`[${n}] ${kind} "${label}"${r.top > innerHeight ? ' (below)' : ''}`);
+        out.push({ local: n, line: `${kind} "${label}"${r.top > innerHeight ? ' (below)' : ''}` });
         n++;
         if (n >= max) break;
       }
       const se = document.scrollingElement;
-      return {
-        url: location.href, title: document.title, count: n,
-        scroll: se ? `${Math.round(se.scrollTop)}/${Math.round(se.scrollHeight - se.clientHeight)}` : '',
-        items: out.join('\n'),
-      };
+      return { url: location.href, title: document.title, top: window === window.top, items: out,
+        scroll: se ? `${Math.round(se.scrollTop)}/${Math.round(se.scrollHeight - se.clientHeight)}` : '' };
     },
-    args: [Math.min(Number(limit) || 150, 400)],
+    args: [max],
+  });
+  const map = [];
+  const lines = [];
+  let main = null;
+  for (const fr of results) {
+    const r = fr.result;
+    if (!r) continue;
+    if (r.top) main = r;
+    if (!r.items.length) continue;
+    if (!r.top) lines.push(`-- inside embedded frame: ${r.url.slice(0, 80)}`);
+    for (const it of r.items) {
+      if (map.length >= max) break;
+      lines.push(`[${map.length}] ${it.line}`);
+      map.push({ frameId: fr.frameId, local: it.local });
+    }
+  }
+  snapshotMaps.set(tab.id, map);
+  return { url: main?.url ?? tab.url, title: main?.title ?? tab.title, count: map.length, scroll: main?.scroll ?? '', items: lines.join('\n') };
+}
+
+async function clickSnapshotIndex(tab, index, guard) {
+  const entry = (snapshotMaps.get(tab.id) || [])[Number(index)];
+  if (!entry) return null;
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, frameIds: [entry.frameId] },
+    func: (local, grd) => {
+      const click = (el, grd) => {
+        if (!el) return { found: false };
+        const label = `${el.innerText || el.textContent || el.value || ''} ${(el.getAttribute && el.getAttribute('aria-label')) || ''}`;
+        if (grd && new RegExp(grd, 'i').test(label)) return { found: true, refused: true, text: label.trim().slice(0, 80) };
+        if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+        const r = el.getBoundingClientRect();
+        const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+        el.dispatchEvent(new PointerEvent('pointerdown', opts));
+        el.dispatchEvent(new MouseEvent('mousedown', opts));
+        el.dispatchEvent(new PointerEvent('pointerup', opts));
+        el.dispatchEvent(new MouseEvent('mouseup', opts));
+        el.click();
+        return { found: true, tag: el.tagName, text: (el.innerText || el.textContent || '').trim().substring(0, 100) };
+      };
+      const find = (root) => {
+        const hit = root.querySelector(`[data-bb-idx="${local}"]`);
+        if (hit) return hit;
+        for (const e of root.querySelectorAll('*')) if (e.shadowRoot) { const h = find(e.shadowRoot); if (h) return h; }
+        return null;
+      };
+      return click(find(document), grd);
+    },
+    args: [entry.local, guard || null],
   });
   return result;
+}
+
+// ── screenshot: what the page looks like (for screens the DOM won't explain) ──
+
+async function doScreenshot({ tabId }) {
+  const tab = await getTab(tabId);
+  await chrome.tabs.update(tab.id, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+  await sleep(400);
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 60 });
+  const [{ result: view }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => ({ w: innerWidth, h: innerHeight }) });
+  // Scale to page (CSS) pixels so x,y read off the image are what click_at and
+  // real_click expect, even on a 2x display.
+  let base64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
+  try {
+    const bmp = await createImageBitmap(await (await fetch(dataUrl)).blob());
+    if (bmp.width !== view.w) {
+      const canvas = new OffscreenCanvas(view.w, view.h);
+      canvas.getContext('2d').drawImage(bmp, 0, 0, view.w, view.h);
+      const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.6 });
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      base64 = btoa(bin);
+    }
+  } catch { /* keep the original image */ }
+  return { base64, width: view.w, height: view.h };
+}
+
+// ── real input: trusted mouse/keyboard events via Chrome's DevTools protocol ──
+// For pages that ignore scripted clicks. Attaching shows Chrome's "being
+// controlled" bar on that tab; we detach after a minute idle.
+
+const attached = new Map(); // tabId -> detach timer
+
+async function cdp(tabId, method, params = {}) {
+  if (!attached.has(tabId)) {
+    await chrome.debugger.attach({ tabId }, '1.3');
+  } else {
+    clearTimeout(attached.get(tabId));
+  }
+  attached.set(tabId, setTimeout(() => { chrome.debugger.detach({ tabId }).catch(() => {}); attached.delete(tabId); }, 60_000));
+  return chrome.debugger.sendCommand({ tabId }, method, params);
+}
+chrome.debugger.onDetach.addListener((src) => { if (src.tabId) attached.delete(src.tabId); });
+
+/** What's at x,y (top-level page coordinates), looking into same-tab frames: its label, for the guard. */
+async function labelAt(tab, x, y) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (px, py) => {
+      let el = document.elementFromPoint(px, py);
+      while (el && el.shadowRoot) { const inner = el.shadowRoot.elementFromPoint(px, py); if (!inner || inner === el) break; el = inner; }
+      if (!el) return { label: '' };
+      if (el.tagName === 'IFRAME') { const r = el.getBoundingClientRect(); return { iframe: el.src, x: px - r.left, y: py - r.top }; }
+      return { label: `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''}`.trim().slice(0, 120) };
+    },
+    args: [x, y],
+  });
+  if (result && result.iframe) {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+    const fr = frames.find((f) => f.frameId !== 0 && f.url.startsWith(result.iframe.split('#')[0]));
+    if (!fr) return '';
+    const [{ result: inner }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, frameIds: [fr.frameId] },
+      func: (px, py) => { const el = document.elementFromPoint(px, py); return el ? `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''}`.trim().slice(0, 120) : ''; },
+      args: [result.x, result.y],
+    });
+    return inner || '';
+  }
+  return (result && result.label) || '';
+}
+
+/** Center of a snapshot-indexed element in top-level page coordinates. */
+async function pointOfIndex(tab, index) {
+  const entry = (snapshotMaps.get(tab.id) || [])[Number(index)];
+  if (!entry) return null;
+  const [{ result: inFrame }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, frameIds: [entry.frameId] },
+    func: (local) => {
+      const find = (root) => {
+        const hit = root.querySelector(`[data-bb-idx="${local}"]`);
+        if (hit) return hit;
+        for (const e of root.querySelectorAll('*')) if (e.shadowRoot) { const h = find(e.shadowRoot); if (h) return h; }
+        return null;
+      };
+      const el = find(document);
+      if (!el) return null;
+      el.scrollIntoView({ block: 'center' });
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, url: location.href };
+    },
+    args: [entry.local],
+  });
+  if (!inFrame) return null;
+  if (entry.frameId === 0) return { x: inFrame.x, y: inFrame.y };
+  // Inside a frame: add the frame's offset in the top page.
+  const [{ result: off }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (url) => {
+      for (const f of document.querySelectorAll('iframe')) {
+        if (f.src && url.startsWith(f.src.split('#')[0])) { const r = f.getBoundingClientRect(); return { x: r.left, y: r.top }; }
+      }
+      return null;
+    },
+    args: [inFrame.url],
+  });
+  return off ? { x: off.x + inFrame.x, y: off.y + inFrame.y } : null;
+}
+
+async function doRealClick({ index, x, y, guard, tabId }) {
+  const tab = await getTab(tabId);
+  let pt = null;
+  if (index != null) pt = await pointOfIndex(tab, index);
+  else if (x != null && y != null) pt = { x: Number(x), y: Number(y) };
+  if (!pt) return { error: 'real_click needs an index from the last snapshot, or x,y from a screenshot.' };
+  await sleep(300); // let scrollIntoView settle
+  const label = await labelAt(tab, pt.x, pt.y);
+  if (guard && new RegExp(guard, 'i').test(label)) {
+    return { error: `Refused: "${label.slice(0, 80)}" pays or adds a card. STOP and return status "blocked" saying the site wants a card or payment.` };
+  }
+  const base = { x: Math.round(pt.x), y: Math.round(pt.y), button: 'left', clickCount: 1 };
+  await cdp(tab.id, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved' });
+  await cdp(tab.id, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' });
+  await cdp(tab.id, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' });
+  await sleep(1500);
+  const t = await chrome.tabs.get(tab.id);
+  return { clicked: true, real: true, at: base, elementText: label.slice(0, 100), currentUrl: t.url, currentTitle: t.title };
+}
+
+async function doRealType({ value, fieldGuard, tabId }) {
+  const tab = await getTab(tabId);
+  if (value == null || value === '') return { error: 'value is required' };
+  // What has focus (looking into same-tab frames), checked against the caller's rule.
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, allFrames: true },
+    func: () => {
+      if (!document.hasFocus()) return null;
+      let el = document.activeElement;
+      while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+      if (!el || el === document.body || el.tagName === 'IFRAME') return null;
+      return `${el.name || ''} ${el.id || ''} ${el.getAttribute('autocomplete') || ''} ${el.placeholder || ''} ${el.getAttribute('aria-label') || ''} ${el.type || ''}`;
+    },
+  });
+  const field = results.map((r) => r.result).find(Boolean) || '';
+  if (fieldGuard && new RegExp(fieldGuard, 'i').test(field)) {
+    return { error: 'Refused: the focused field is a card/payment field. STOP and return status "blocked" saying the site wants a card.' };
+  }
+  await cdp(tab.id, 'Input.insertText', { text: String(value) });
+  return { typed: String(value).length, field: field.trim().slice(0, 80) };
+}
+
+async function doRealKey({ key, tabId }) {
+  const tab = await getTab(tabId);
+  const KEYS = { enter: ['Enter', 13], tab: ['Tab', 9], escape: ['Escape', 27], esc: ['Escape', 27], backspace: ['Backspace', 8], space: [' ', 32], arrowdown: ['ArrowDown', 40], arrowup: ['ArrowUp', 38] };
+  const k = KEYS[String(key || '').toLowerCase()];
+  if (!k) return { error: `key must be one of: ${Object.keys(KEYS).join(', ')}` };
+  const [name, code] = k;
+  await cdp(tab.id, 'Input.dispatchKeyEvent', { type: 'keyDown', key: name, windowsVirtualKeyCode: code, text: name === 'Enter' ? '\r' : name === ' ' ? ' ' : undefined });
+  await cdp(tab.id, 'Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
+  await sleep(800);
+  return { pressed: name };
+}
+
+// ── click_at: click whatever is at a point on the page (from a screenshot) ──
+
+async function doClickAt({ x, y, guard, tabId }) {
+  const tab = await getTab(tabId);
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (px, py, grd) => {
+      const click = (el, grd) => {
+        if (!el) return { found: false };
+        const label = `${el.innerText || el.textContent || el.value || ''} ${(el.getAttribute && el.getAttribute('aria-label')) || ''}`;
+        if (grd && new RegExp(grd, 'i').test(label)) return { found: true, refused: true, text: label.trim().slice(0, 80) };
+        if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+        const r = el.getBoundingClientRect();
+        const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+        el.dispatchEvent(new PointerEvent('pointerdown', opts));
+        el.dispatchEvent(new MouseEvent('mousedown', opts));
+        el.dispatchEvent(new PointerEvent('pointerup', opts));
+        el.dispatchEvent(new MouseEvent('mouseup', opts));
+        el.click();
+        return { found: true, tag: el.tagName, text: (el.innerText || el.textContent || '').trim().substring(0, 100) };
+      };
+      let el = document.elementFromPoint(px, py);
+      while (el && el.shadowRoot) { const inner = el.shadowRoot.elementFromPoint(px, py); if (!inner || inner === el) break; el = inner; }
+      if (el && el.tagName === 'IFRAME') {
+        const r = el.getBoundingClientRect();
+        return { iframe: true, src: el.src, x: px - r.left, y: py - r.top };
+      }
+      return click(el, grd);
+    },
+    args: [Number(x), Number(y), guard || null],
+  });
+  if (result && result.iframe) {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+    const fr = frames.find((f) => f.frameId !== 0 && result.src && f.url.startsWith(result.src.split('#')[0]));
+    if (!fr) return { error: 'That spot is inside an embedded frame I could not reach. Try snapshot.' };
+    const [{ result: inner }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, frameIds: [fr.frameId] },
+      func: (px, py, grd) => {
+        const click = (el, grd) => {
+        if (!el) return { found: false };
+        const label = `${el.innerText || el.textContent || el.value || ''} ${(el.getAttribute && el.getAttribute('aria-label')) || ''}`;
+        if (grd && new RegExp(grd, 'i').test(label)) return { found: true, refused: true, text: label.trim().slice(0, 80) };
+        if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+        const r = el.getBoundingClientRect();
+        const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+        el.dispatchEvent(new PointerEvent('pointerdown', opts));
+        el.dispatchEvent(new MouseEvent('mousedown', opts));
+        el.dispatchEvent(new PointerEvent('pointerup', opts));
+        el.dispatchEvent(new MouseEvent('mouseup', opts));
+        el.click();
+        return { found: true, tag: el.tagName, text: (el.innerText || el.textContent || '').trim().substring(0, 100) };
+      };
+        return click(document.elementFromPoint(px, py), grd);
+      },
+      args: [result.x, result.y, guard || null],
+    });
+    return finishClick(tab, inner, `${x},${y}`);
+  }
+  return finishClick(tab, result, `${x},${y}`);
+}
+
+async function finishClick(tab, result, what) {
+  if (!result || !result.found) return { error: `Nothing clickable at ${what}. Take a screenshot or snapshot again.` };
+  if (result.refused) return { error: `Refused: "${result.text}" pays or adds a card. STOP and return status "blocked" saying the site wants a card or payment.` };
+  await sleep(1500);
+  const t = await chrome.tabs.get(tab.id);
+  return { clicked: true, element: result.tag, elementText: result.text, currentUrl: t.url, currentTitle: t.title };
 }
 
 // ── scroll: the page, or the biggest scrollable list on it ──

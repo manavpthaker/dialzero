@@ -109,7 +109,7 @@ export function parseWebTaskResult(text: string): WebTaskResult {
   out.next_charge = day(obj.next_charge);
   if (status === 'needs_owner') {
     const need = String(obj.need ?? '');
-    out.need = (['login', 'code', 'decision', 'info'].includes(need) ? need : guessNeed(summary)) as WaitNeed;
+    out.need = (['login', 'code', 'link', 'decision', 'info'].includes(need) ? need : guessNeed(summary)) as WaitNeed;
     out.ask = str(obj.ask) ?? summary;
   }
   return out;
@@ -122,6 +122,7 @@ function prefsFor(...parts: string[]): string {
 
 /** What a "blocked on the owner" summary is asking for. */
 export function guessNeed(text: string): WaitNeed {
+  if (/\b(magic link|sign[- ]?in link|login link|emailed (you )?a link|sent (you )?a link|link to sign)\b/i.test(text)) return 'link';
   if (/\b(code|2fa|two-factor|verification|one-time|otp)\b/i.test(text)) return 'code';
   if (/\b(log ?in|sign ?in|password|logged out|session)\b/i.test(text)) return 'login';
   if (/\b(decide|choice|which|approve|approval|confirm)\b/i.test(text)) return 'decision';
@@ -146,7 +147,9 @@ How:
 4. Long jobs (many items one at a time): work steadily, and after roughly 20 items stop with status "in_progress", saying exactly what's done and what's left. You'll be started again to continue.
 
 When something doesn't work, try another way before giving up. In order:
-- Use snapshot to see what's actually clickable, then click by index. Rows in a list, "..." menus, and icons often only show in snapshot.
+- Use snapshot to see what's actually clickable, then click by index. Rows in a list, "..." menus, and icons often only show in snapshot (it includes embedded frames and popups).
+- If the page still doesn't make sense (a step you can't read, a popup with no text), take a screenshot and look, then click_at the right spot. Never ask the owner what's on the screen: look.
+- If a click or typing does nothing (some pages ignore scripted input), use real_click / real_type / real_key: real mouse and keyboard input.
 - Scroll: long lists load more as you scroll. Look for a select-all checkbox, a bulk "Export" or "Download" in a toolbar, a "..." menu on each item, and account/settings pages (often "Data", "Privacy", "Export", "Download my data").
 - Look it up: web_search "how to <task> on <site>" and follow the help-center steps.
 - Check your work: check_downloads shows what landed in Downloads.
@@ -155,6 +158,7 @@ When something doesn't work, try another way before giving up. In order:
 Status rules:
 - "needs_owner" when only they can unblock it, and the job will wait for their answer (don't navigate away from the page you're on):
   - need "code": the site sent them a code (text or email). Click "send code" first if there's a button for it. They'll text it to you and you'll be started again here with it.
+  - need "link": the site emailed them a sign-in link. You'll be started again with it ready to open.
   - need "login": a login page their password manager didn't fill. They'll log in on the Mac and tell you.
   - need "decision": a choice only they can make (which plan, keep or delete). Put the options in "ask".
   - "ask" is the one short question they'll see, e.g. "Plaud sent you a code. What is it?" or "Plaud wants you to log in on the Mac. Tell me when you're in."
@@ -162,18 +166,20 @@ Status rules:
 - Anything else you couldn't do yet (can't find the button, a click did nothing, the page is confusing) is "failed" with what you tried and what to try next. You'll be started again with that note, so the next run tries something different.
 
 Hard rules:
+- Billing often moves to another site or a pop-up (Stripe, Shopify, Paddle, Chargebee): follow it. When a click opens a new window you're told, and your tools switch to it.
+- Email sign-ins (a page that asks only for an email, then sends a code or a sign-in link, like Stripe's or Shopify's): enter THEIR EMAIL FOR THIS SITE (or one from DETAILS or an answer), click send, then return needs_owner with need "code" or "link". Both are fetched from their email automatically. If you don't know which email, return needs_owner info asking "Which email do you use for <site>?".
 - Logins: if a login page is filled in, click sign in. If it stays empty or asks for a password, return needs_owner login. A code: return needs_owner code, then type it ONLY with enter_owner_code once you have it. Never type or guess a password or code yourself. A CAPTCHA: needs_owner login.
 - NEVER pay, enter a card, or click a pay/upgrade button.
-- When cancelling: decline every offer to stay (discounts, free months, pausing, downgrading) unless NOTES says to take it. Keep going to the final cancel confirmation. If the only way to cancel is a phone call or chat with a person, STOP with status "blocked" and say so.
+- When cancelling: decline every offer to stay (discounts, free months, pausing, downgrading) unless NOTES says to take it. An offer to stay is never a reason to stop or ask, whatever TASK says. Keep going to the final cancel confirmation. If the only way to cancel is a phone call or chat with a person, STOP with status "blocked" and say so.
 - Never delete the account or its data unless TASK says to, in those words. Never change a password or email.
 - Don't create accounts. Don't do anything the task didn't ask for.
 
 Your LAST message must be ONLY this JSON (no other text):
-{"status":"done|in_progress|needs_owner|blocked|failed","need":"code|login|decision (needs_owner only)","ask":"their one question (needs_owner only)","summary":"one or two short lines for the owner: what happened, and when it ends if it's a cancellation (for in_progress: what's done and what's left)","confirmation":"confirmation number or email mentioned, if shown","ends_on":"YYYY-MM-DD access ends, if a cancellation page shows it","next_charge":"YYYY-MM-DD the next billing date that should now not charge, if shown","url":"page you ended on"}
+{"status":"done|in_progress|needs_owner|blocked|failed","need":"code|link|login|decision (needs_owner only)","ask":"their one question (needs_owner only)","summary":"one or two short lines for the owner: what happened, and when it ends if it's a cancellation (for in_progress: what's done and what's left)","confirmation":"confirmation number or email mentioned, if shown","ends_on":"YYYY-MM-DD access ends, if a cancellation page shows it","next_charge":"YYYY-MM-DD the next billing date that should now not charge, if shown","url":"page you ended on"}
 Use "done" only when the page showed the task finished (e.g. "Your subscription has been cancelled").`;
 }
 
-interface RunState { runs: number; progress: string[]; nextAt: number }
+interface RunState { runs: number; progress: string[]; nextAt: number; email?: string | null }
 
 function loadState(id: number): RunState {
   try {
@@ -240,11 +246,20 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
           // code never does (enter_owner_code types it from the job).
           job = getJob(jobId);
           const answered = takeAnswer(jobId);
-          const extra = answered
-            ? `THE OWNER ANSWERED your question "${answered.ask}": ${answered.answer}\nContinue from where you are.`
-            : job?.waiting_for === 'code' && job.answer
-              ? `THE OWNER SENT THE CODE. At the code field, call enter_owner_code with that field's selector, then continue.`
-              : '';
+          if (st.email === undefined) {
+            st.email = await emailLookup(brandsFor(p.site, null)).catch(() => null);
+            saveState(actionId, st);
+          }
+          const extra = [
+            st.email ? `THEIR EMAIL FOR THIS SITE (the address it emails them at): ${st.email}` : '',
+            answered
+              ? `THE OWNER ANSWERED your question "${answered.ask}": ${answered.answer}\nContinue from where you are.`
+              : job?.waiting_for === 'code' && job.answer
+                ? `THE OWNER SENT THE CODE. At the code field, call enter_owner_code with that field's selector, then continue.`
+                : job?.waiting_for === 'link' && job.answer
+                  ? `THE SIGN-IN LINK ARRIVED. Call open_sign_in_link (no arguments); it opens in your tab. Then continue.`
+                  : '',
+          ].filter(Boolean).join('\n');
           activeRun = { actionId, jobId, codeHost: job?.code_host ?? null };
           let out: string | null;
           try {
@@ -256,6 +271,12 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
           result = out === null
             ? { status: 'in_progress', summary: `A run hit the ${Math.round(timeoutMs / 60_000)}-min limit; check the page for what's done.` }
             : parseWebTaskResult(out);
+          // A run that ran out of steps before writing its JSON isn't a wall:
+          // carry on from the page it's on, with whatever it said last.
+          if (result.status === 'failed' && /^Couldn't read the result/.test(result.summary)) {
+            const said = (out ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+            result = { status: 'in_progress', summary: `Ran out of steps mid-way; continue from the current page.${said ? ` It last said: ${said}` : ''}` };
+          }
         } catch (err) {
           result = { status: 'failed', summary: `Browser error: ${err instanceof Error ? err.message : String(err)}` };
         }
@@ -273,6 +294,23 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
       if (result.status === 'needs_owner') {
         const need = result.need ?? 'info';
         const host = need === 'code' ? await hostReader().catch(() => null) : null;
+        // A code the site emailed them (or that their phone forwarded): fetch it
+        // and keep going without asking. It's typed by enter_owner_code, so it
+        // still never reaches the model, and only on this same site.
+        if (need === 'code' || need === 'link') {
+          const pageHost = host ?? await hostReader().catch(() => null);
+          const brands = brandsFor(p.site, pageHost);
+          const askedAt = Date.now() - 3 * 60_000; // the run may have clicked "send" a bit ago
+          const found = await codeLookup(brands, askedAt).catch(() => null);
+          if (found) {
+            const isLink = 'link' in found && !!found.link;
+            patchJob(jobId, { status: 'working', waiting_for: isLink ? 'link' : 'code', code_host: pageHost, answer: isLink ? (found as { link: string }).link : (found as { code: string }).code, answered_at: new Date().toISOString() });
+            st.progress = [...st.progress, `Run ${st.runs} (progress): got the sign-in ${isLink ? 'link' : 'code'} from ${'source' in found && found.source === 'text' ? 'their phone' : 'their email'}; ${isLink ? 'open it' : 'enter it'} and continue.`].slice(-10);
+            st.runs = Math.max(0, st.runs - 1);
+            saveState(actionId, st);
+            continue;
+          }
+        }
         waitOnOwner(jobId, need, result.ask ?? result.summary, host);
         st.progress = [...st.progress, `Run ${st.runs} (paused for the owner): ${result.summary}`].slice(-10);
         st.runs = Math.max(0, st.runs - 1); // waiting on them doesn't use up a try
@@ -284,7 +322,7 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
       if (result.status === 'in_progress') setJobProgress(jobId, result.summary);
       st.progress = [...st.progress, `Run ${st.runs} (${result.status === 'in_progress' ? 'progress' : "didn't work"}): ${result.summary}`].slice(-10);
       // The same wall three runs in a row: more runs won't change it. Stop
-      // and ask the owner, with the routes left (email them, do it themselves, skip it).
+      // and ask them, with the routes left (email them, do it themselves, skip it).
       if (result.status === 'failed' && sameWall(st.progress)) {
         const ask = `${p.site.replace(/^https?:\/\//, '').replace(/\/.*$/, '')} keeps hitting the same wall: ${result.summary.replace(/\s*\(Not actually blocked[^)]*\)/, '')} Want me to email their support instead, or skip this part?`;
         waitOnOwner(jobId, 'decision', ask);
@@ -349,6 +387,32 @@ export function activeWebTaskRun(): { actionId: number; jobId: number; codeHost:
 /** Runs after a job finishes well (follow-up watches hook in here). */
 const afterDone: Array<(jobId: number, p: WebTaskPayload, r: WebTaskResult) => void> = [];
 export function onWebTaskDone(fn: (jobId: number, p: WebTaskPayload, r: WebTaskResult) => void): void { afterDone.push(fn); }
+
+/** Names a code email or text from this site would carry ("plaud", "shopify"). */
+export function brandsFor(site: string, host: string | null): string[] {
+  const core = (h: string) => h.replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^(www|web|app|account|accounts|login|auth|shop)\./, '').split('.')[0];
+  const out = new Set<string>();
+  if (/^https?:|\./.test(site)) out.add(core(site)); else out.add(site.trim().split(/\s+/)[0].toLowerCase());
+  if (host) out.add(core(host));
+  return [...out].filter((b) => b && b.length >= 3);
+}
+
+type SignIn = { code: string; source?: 'email' | 'text' } | { link: string; source?: 'email' };
+let codeLookup: (brands: string[], sinceMs: number) => Promise<SignIn | null> = async (brands, sinceMs) => {
+  const hit = await (await import('./lib/code-finder.js')).findFreshSignIn(brands, sinceMs);
+  if (hit?.code) return { code: hit.code.code, source: hit.code.source };
+  if (hit?.link) return { link: hit.link.link, source: 'email' };
+  return null;
+};
+let emailLookup: (brands: string[]) => Promise<string | null> = async (brands) => (await import('./lib/code-finder.js')).findAccountEmail(brands);
+/** Tests swap in a fake account-email lookup. */
+export function setWebTaskEmailLookup(fn: typeof emailLookup | null): void {
+  if (fn) emailLookup = fn;
+}
+/** Tests swap in a fake code lookup. */
+export function setWebTaskCodeLookup(fn: typeof codeLookup | null): void {
+  if (fn) codeLookup = fn;
+}
 
 let hostReader: () => Promise<string | null> = async () => {
   const { browserTools } = await import('./tools/browser.js');

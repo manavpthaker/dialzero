@@ -13,6 +13,8 @@ process.env.ACTIONS_ENABLED = 'true';
 const db = await import('../src/db.js');
 const wb = await import('../src/web-booking.js');
 const wt = await import('../src/web-task.js');
+wt.setWebTaskCodeLookup(async () => null); // never touch real email/texts in tests
+wt.setWebTaskEmailLookup(async () => null);
 const { toolRegistry } = await import('../src/tools/index.js');
 const { looksLikeWebTask } = await import('../src/tools/computer-use.js');
 const { getOwner } = await import('../src/config.js');
@@ -163,7 +165,7 @@ try {
     assert.equal(db.getAction(id)!.status, 'done');
   });
 
-  await check('the same wall three runs in a row: stops and asks him instead of grinding', async () => {
+  await check('the same wall three runs in a row: stops and asks them instead of grinding', async () => {
     const wall = (n: number) => `{"status":"failed","summary":"Plaud's web UI only exposes share links (try ${n}), not transcript export; nothing exported."}`;
     const replies = [wall(1), wall(2), wall(3), doneJson];
     let runs = 0;
@@ -208,6 +210,8 @@ try {
     assert.equal(wb.paymentRefusal({ action: 'click', text: 'Cancel subscription' }), null);
     assert.ok(wb.paymentRefusal({ action: 'click', selector: '#card-number' }));
     assert.ok(wb.paymentRefusal({ action: 'click', text: 'Pay now' }));
+    assert.ok(wb.paymentRefusal({ action: 'real_type', value: '4111 1111 1111 1111' }), 'real typing never enters a card number');
+    assert.equal(wb.paymentRefusal({ action: 'real_type', value: 'Alex Rivera' }), null);
   });
 
   console.log(`\nWeb task tests passed: ${passed} checks.`);

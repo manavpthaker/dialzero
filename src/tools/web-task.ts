@@ -12,7 +12,7 @@ import { checkActionsEnabled } from '../lib/spend-cap.js';
 import { ownerAskedForWebTask } from '../lib/owner-request.js';
 import { bookingDeps } from '../web-booking.js';
 import { prepareWebTask, startWebTask, activeWebTaskRun, WEB_TASK_NOT_CONNECTED, type WebTaskPayload } from '../web-task.js';
-import { takeCode } from '../jobs.js';
+import { takeCode, takeLink, matchItem, answerItem } from '../jobs.js';
 import { bookingWindowOpen } from '../web-booking.js';
 import { browserTools } from './browser.js';
 
@@ -24,7 +24,7 @@ export const webTaskTools: ToolDef[] = [
 - owner_request: the owner's exact words asking for it, copied from their message (this one or one in the last 30 minutes). With it, it runs now, no "go". Omit it when it's YOUR idea; then it's staged as #action:N for their "go".
 - task: the whole job in order, in plain words, e.g. "export all recordings as audio, then cancel the subscription". Put must-do-first steps first; it stops before cancelling if an earlier step fails.
 - site: the URL or the service name.
-It never pays, never takes an offer to stay, and stops if a login or code is needed. The result comes back by text. If a site only lets you cancel by phone, offer call_now.
+It never pays and always turns down offers to stay on its own, so never tell it to stop or ask at a retention offer. It pauses for them only for a login, a code, or a real decision. The result comes back by text. If a site only lets you cancel by phone, offer call_now.
 After calling this, tell the owner the returned line in one short sentence (for a proposal, DM the exact text returned).`,
       input_schema: {
         type: 'object' as const,
@@ -47,6 +47,14 @@ After calling this, tell the owner the returned line in one short sentence (for 
       const group = context?.groupKey || 'admin';
       const quote = String(input.owner_request ?? '').trim();
       const payload = prepared.payload as unknown as WebTaskPayload;
+      // Already on it? A second job on the same site would fight the first for
+      // the browser. Waiting on them → their words are the answer; running → say so.
+      const site = (() => { try { return new URL(payload.site).hostname.replace(/^(www|web|app)\./, '').split('.')[0]; } catch { return payload.site; } })();
+      const same = matchItem(`${site} ${payload.task}`, (i) => i.key.startsWith('job:') && (i.status === 'working' || i.status === 'waiting_on_you') && i.title.toLowerCase().includes(site.toLowerCase()));
+      if ('item' in same) {
+        if (same.item.status === 'waiting_on_you') return answerItem(same.item.title, quote || payload.task);
+        return `Already working on that (${same.item.title.replace(/\.$/, '')}). Tell them in one line; don't start another.`;
+      }
       if (quote && ownerAskedForWebTask(quote, context)) {
         const { id, done } = startWebTask(payload, prepared.summary, group);
         void done;
@@ -127,5 +135,24 @@ export const enterOwnerCodeTool: ToolDef = {
     if (!code) return 'No code from the owner (or it expired after 10 minutes). Return needs_owner with need "code" so they can send a fresh one.';
     const r = String(await browser.handler({ action: 'fill_input', selector: String(input.selector ?? ''), value: code }, { groupKey: 'booking' }));
     return /fail|not found|error/i.test(r) ? `Couldn't type it there: ${r}. Find the right field with snapshot; the code is used up, so if this fails, return needs_owner code for a fresh one.` : 'Entered the code. Now click the verify/continue button.';
+  },
+};
+
+// For the web-task sub-agent: opens the sign-in link the site emailed them, in
+// the job's own tab, without the link (a login token) entering the prompt.
+export const openSignInLinkTool: ToolDef = {
+  definition: {
+    name: 'open_sign_in_link',
+    description: 'Open the sign-in link the site emailed the owner, in your tab. Use only after you were told the sign-in link arrived. Then continue from the page it opens.',
+    input_schema: { type: 'object' as const, properties: {} },
+  },
+  handler: async () => {
+    const run = activeWebTaskRun();
+    if (!run || !bookingWindowOpen()) return 'Refused: no website job is running.';
+    const link = takeLink(run.jobId);
+    if (!link) return 'No sign-in link (or it expired after 10 minutes). Return needs_owner with need "link" so a fresh one can be sent.';
+    const out = String(await browserTools[0].handler({ action: 'navigate', url: link }, { groupKey: 'booking' }));
+    // Keep the token out of the transcript: drop URLs from what comes back.
+    return `Opened the sign-in link.\n${out.replace(/https?:\/\/\S+/g, '[link]').slice(0, 3000)}`;
   },
 };
