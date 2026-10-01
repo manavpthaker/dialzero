@@ -26,6 +26,8 @@ It's not an app you open. It's a contact in your phone.
 | "Download all my recordings from that app, then cancel it" | Works through the site one step at a time, checks the files landed in Downloads, and only cancels once the export is done. |
 | "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
 | "Hey Siri, ask Milo what's next" (whatever you named it) | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
+| "What are you working on?" | One short list: what's waiting on you, what it's doing, and what it's keeping an eye on. Say "stop" about any of it. |
+| "Make sure they refund me" | Keeps checking your email (and follows up on its own after a cancellation) and only texts you if something's wrong. |
 | A voice memo | Transcribes it and files away what matters. |
 
 Plus a shared **family chat**: add it to a group text with your partner and it keeps a shared calendar and grocery list.

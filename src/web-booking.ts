@@ -13,6 +13,7 @@
 // Either way the result is a `reply` interrupt, and a done booking lands on the
 // calendar. The same actions row is the audit trail (kind 'booking').
 
+import { preferencesFor } from './lib/preferences.js';
 import {
   proposeAction, confirmAction, markActionExecuting, markActionDone, markActionFailed,
   type Action,
@@ -163,6 +164,11 @@ export function toET(iso: string): { date: string; time: string } | null {
 
 let windowUntil = 0;
 
+/** Close the open browser run now (the owner said stop): every scoped browser tool refuses from here. */
+export function abortBrowserRun(): void {
+  windowUntil = 0;
+}
+
 /** True only while a booking run holds the browser and its time box is open. */
 export function bookingWindowOpen(now = Date.now()): boolean {
   return now < windowUntil;
@@ -249,7 +255,7 @@ export function bookingPrompt(p: BookingPayload): string {
 BOOK: ${p.what}
 WHERE: ${p.where}
 WHEN: ${p.when}${p.party_size ? `\nPARTY SIZE: ${p.party_size}` : ''}
-DETAILS YOU MAY ENTER (and nothing else): ${p.share}${p.notes ? `\nNOTES: ${p.notes}` : ''}
+DETAILS YOU MAY ENTER (and nothing else): ${p.share}${p.notes ? `\nNOTES: ${p.notes}` : ''}${(() => { const pr = preferencesFor(`${p.what} ${p.where}`); return pr ? `\n\n${pr}` : ''; })()}
 
 How:
 1. If WHERE is a URL, open it. Otherwise find the business's booking page (their site, Resy, or OpenTable; a Google search via browser_navigate is fine). If WHERE is vague ("a good Italian place downtown"), pick one well-reviewed place that has online availability in the window.

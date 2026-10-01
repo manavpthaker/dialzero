@@ -18,7 +18,9 @@ import { actionTools } from './actions.js';
 import { errandTools } from './errands.js';
 import { sendNowTools } from './send-now.js';
 import { webBookingTools, bookingBrowserTools } from './web-booking.js';
-import { webTaskTools, checkDownloadsTool } from './web-task.js';
+import { webTaskTools, checkDownloadsTool, enterOwnerCodeTool } from './web-task.js';
+import { jobTools } from './jobs.js';
+import { followupTools } from './followups.js';
 import { wakeUpTools } from './wakeup.js';
 import { computerUseTools } from './computer-use.js';
 import { notionTools } from './notion.js';
@@ -95,13 +97,18 @@ export const toolRegistry: Record<string, ToolDef[]> = {
   messages: messagesTools,
   recall: recallTools,
   // Split by feature module (src/modules.ts) so each can be switched off alone.
-  actions: [...actionTools, ...sendNowTools],
+  actions: [...actionTools, ...sendNowTools, ...jobTools, ...followupTools],
   errands: [...errandTools, ...wakeUpTools],
   'web-booking': [...webBookingTools, ...webTaskTools],
   // Only the booking sub-agent (web-booking.ts BOOKING_GROUP) gets these.
   // Booking and website-job runs: the scoped browser tools, plus proof that a
   // download landed and a web search for "how do I export/cancel on X".
-  'booking-browser': [...bookingBrowserTools, checkDownloadsTool, ...webTools.filter((t) => t.definition.name === 'web_search')],
+  // Follow-up checks (src/followups.ts): read-only email and web search.
+  'followup-tools': [
+    ...emailTools.filter((t) => ['email_list', 'email_search', 'email_read_thread'].includes(t.definition.name)),
+    ...webTools.filter((t) => t.definition.name === 'web_search'),
+  ],
+  'booking-browser': [...bookingBrowserTools, checkDownloadsTool, enterOwnerCodeTool, ...webTools.filter((t) => t.definition.name === 'web_search')],
   'computer-use': computerUseTools,
   notion: notionTools,
   'family-calendar': familyCalendarTools,

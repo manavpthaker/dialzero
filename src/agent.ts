@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { captionPhoto } from './lib/photo-caption.js';
 import { budgetStopResponse, isLlmBudgetError } from './lib/token-budget.js';
 import type { GroupConfig } from './group-resolver.js';
 import type { User } from './user-resolver.js';
 import type { ImageData, DocumentData } from './channels/imessage.js';
 import { loadSystemBlocks, getRetrievedBlocksSmart } from './context-resolver.js';
-import { getRecentMessages, getRecentMessagesWithMetadata, listFamilyLists, saveMessage, type MessageRow } from './db.js';
+import { getRecentMessages, getRecentMessagesWithMetadata, listFamilyLists, saveMessage, appendToMessage, type MessageRow } from './db.js';
 import { toolRegistry, type ToolDef } from './tools/index.js';
 import { getProfileConfig } from './config.js';
 import { bindFamilyListAddRequest } from './family-list-intent.js';
@@ -696,13 +697,18 @@ export async function runAgent(
   // no retention policy. What the system actually SAID is recorded in
   // outbound_log by the arbiter, which is the better record anyway.
   if (!systemAuthored) {
-    saveMessage(
+    const savedId = saveMessage(
       groupConfig.key,
       user.id,
       'user',
       userMessage,
       groupConfig.key === 'family' ? sourceMessage?.timestamp : undefined,
     );
+    // History keeps text only; note what the photo showed so "pay that one"
+    // later still has something to refer to. In the background, off the reply path.
+    if (image && groupConfig.key !== 'family') {
+      void captionPhoto(image).then((c) => { if (c) appendToMessage(savedId, `\n[Photo: ${c}]`); });
+    }
   }
 
   // Get scoped tools for this group

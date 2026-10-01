@@ -401,7 +401,8 @@ export const MODULES: ModuleSpec[] = [
     title: 'Actions with approval',
     description: 'Lets the assistant text or email people for you, but only after you reply "go" to approve each one.',
     defaultEnabled: true,
-    tools: ['actions'],
+    tools: ['actions', 'followup-tools'],
+    start: ['followups'],
     env: [
       { key: 'ACTIONS_ENABLED', example: 'true', featureSwitch: { defaultOn: true }, description: 'false = the assistant cannot propose or carry out any action.' },
       { key: 'ACTIONS_DAILY_CAP_USD', example: '100', description: 'Most real money actions may spend per day.' },
@@ -455,7 +456,7 @@ export const MODULES: ModuleSpec[] = [
     description: 'Lets the assistant use Chrome on this Mac to read pages, book appointments, cancel subscriptions, export your data and change account settings. It never pays without your approval.',
     defaultEnabled: false,
     tools: ['browser', 'web-booking', 'booking-browser'],
-    start: ['browser-bridge', 'web-task'],
+    start: ['browser-bridge', 'web-task', 'chrome-health'],
     launchd: ['chrome'],
     env: [
       { key: 'BROWSER_BRIDGE_TOKEN', secret: true, description: 'Shared secret the Chrome extension must send. Strongly recommended.' },

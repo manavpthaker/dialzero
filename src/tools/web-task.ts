@@ -11,7 +11,10 @@ import { proposeAction, getAction } from '../db.js';
 import { checkActionsEnabled } from '../lib/spend-cap.js';
 import { ownerAskedForWebTask } from '../lib/owner-request.js';
 import { bookingDeps } from '../web-booking.js';
-import { prepareWebTask, startWebTask, WEB_TASK_NOT_CONNECTED, type WebTaskPayload } from '../web-task.js';
+import { prepareWebTask, startWebTask, activeWebTaskRun, WEB_TASK_NOT_CONNECTED, type WebTaskPayload } from '../web-task.js';
+import { takeCode } from '../jobs.js';
+import { bookingWindowOpen } from '../web-booking.js';
+import { browserTools } from './browser.js';
 
 export const webTaskTools: ToolDef[] = [
   {
@@ -92,5 +95,37 @@ export const checkDownloadsTool: ToolDef = {
     if (!rows.length) return 'No new files in Downloads in that window.';
     const list = rows.slice(0, 60).map((r) => `${r.name} · ${Math.max(1, Math.round(r.size / 1024))} KB · ${new Date(r.at).toLocaleTimeString('en-US', { timeZone: getTimezone() })}`);
     return `${rows.length} new file(s)${partial ? `, ${partial} still downloading` : ''}:\n${list.join('\n')}${rows.length > 60 ? `\n...and ${rows.length - 60} more` : ''}`;
+  },
+};
+
+// For the web-task sub-agent: types the code the owner texted, without the code
+// ever entering the model's prompt. Only on the site that asked for it, only
+// once, and only within 10 minutes of them sending it.
+export const enterOwnerCodeTool: ToolDef = {
+  definition: {
+    name: 'enter_owner_code',
+    description: 'Type the verification code the owner texted you into the code field. Use only after you were told the owner sent the code. Pass the CSS selector of the code input (from snapshot or the page source). Then click the continue/verify button.',
+    input_schema: {
+      type: 'object' as const,
+      properties: { selector: { type: 'string', description: 'CSS selector of the code input field.' } },
+      required: ['selector'],
+    },
+  },
+  handler: async (input) => {
+    const run = activeWebTaskRun();
+    if (!run || !bookingWindowOpen()) return 'Refused: no website job is running.';
+    const browser = browserTools[0];
+    let host: string | null = null;
+    try {
+      const out = String(await browser.handler({ action: 'get_current_url' }, { groupKey: 'booking' }));
+      host = new URL((JSON.parse(out) as { url?: string }).url ?? '').hostname;
+    } catch { /* checked below */ }
+    if (run.codeHost && (!host || (host !== run.codeHost && !host.endsWith(`.${run.codeHost}`) && !run.codeHost.endsWith(`.${host}`)))) {
+      return `Refused: the code was for ${run.codeHost}, and this page is ${host ?? 'unknown'}. Go back to ${run.codeHost}.`;
+    }
+    const code = takeCode(run.jobId);
+    if (!code) return 'No code from the owner (or it expired after 10 minutes). Return needs_owner with need "code" so they can send a fresh one.';
+    const r = String(await browser.handler({ action: 'fill_input', selector: String(input.selector ?? ''), value: code }, { groupKey: 'booking' }));
+    return /fail|not found|error/i.test(r) ? `Couldn't type it there: ${r}. Find the right field with snapshot; the code is used up, so if this fails, return needs_owner code for a fresh one.` : 'Entered the code. Now click the verify/continue button.';
   },
 };

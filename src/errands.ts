@@ -21,6 +21,7 @@
 // calling the bot's number back about a recent errand is answered with that
 // errand's context (the owner hears about it as a reply).
 
+import { preferencesFor } from './lib/preferences.js';
 import {
   toDialable, isFictionalNumber, placeErrandCall, setErrandCallHooks, setOneOffCallStarter, isPhoneConfigured,
   type CallResult, type CallBooking, type CallbackMatch,
@@ -347,6 +348,7 @@ function callBrief(row: ErrandRow, env: Envelope): { goal: string; context: stri
     env.window ? `Aim for: ${env.window}.` : '',
     env.notes.length ? `Owner's latest instructions: ${env.notes.join(' ')}` : '',
     history.length ? `What has happened so far on this errand:\n${history.join('\n')}` : '',
+    preferencesFor(env.goal),
   ].filter(Boolean).join('\n');
   return { goal, context: env.share };
 }

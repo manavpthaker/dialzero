@@ -62,7 +62,10 @@
     "test:relationship-tracker": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-relationship-tracker.ts",
     "relationship:pulse:dry": "tsx scripts/relationship-pulse-dry.ts",
     "test:modules": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-modules.ts",
-    "test:web-task": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-web-task.ts"
+    "test:web-task": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-web-task.ts",
+    "test:jobs": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-jobs.ts",
+    "test:followups": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-followups.ts",
+    "test:chrome-health": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-chrome-health.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

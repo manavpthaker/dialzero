@@ -1,5 +1,6 @@
 import { scheduleCron } from './lib/cron.js';
-import { getMemory, setMemory, deleteMemory, getRecentMemory, logOutbound, listErrands } from './db.js';
+import { getMemory, setMemory, deleteMemory, getRecentMemory, logOutbound } from './db.js';
+import { openItems } from './jobs.js';
 import { sendMessage, getDefaultRecipient } from './channels/imessage.js';
 import { collectAmbientItems, clearAmbient, saveDetails, trimToLines } from './cos-outbound.js';
 import { OPENAI_ROUTER_MODEL, openAIText } from './lib/openai.js';
@@ -114,18 +115,16 @@ export interface CheckinDeps {
 const defaultDeps: CheckinDeps = { send: sendMessage, target: getDefaultRecipient, compose: composeCheckin };
 
 /**
- * One line per errand still in motion, so a quiet errand isn't invisible. An
- * errand waiting on the owner is already staged as a decision; this only covers
- * ones the bot is still working.
+ * One line per job still open (src/jobs.ts), so nothing they asked for goes
+ * quiet: waiting-on-you first, then what's being worked on. An errand waiting
+ * on them is already staged as a decision, so it's skipped here.
  */
 function openErrandLines(): string[] {
   try {
-    return listErrands({ open: true, limit: 5 })
-      .filter((r) => r.status === 'active')
-      .map((r) => {
-        const goal = (JSON.parse(r.envelope_json) as { goal?: string }).goal ?? r.goal;
-        return `🧾 Errand #${r.id} (${goal}): working on it, ${r.calls_made} call${r.calls_made === 1 ? '' : 's'} so far.`;
-      });
+    return openItems()
+      .filter((i) => !(i.key.startsWith('errand:') && i.status === 'waiting_on_you'))
+      .slice(0, 5)
+      .map((i) => `${i.status === 'waiting_on_you' ? '⏳' : i.status === 'watching' ? '👀' : '🔧'} ${i.line}`);
   } catch {
     return [];
   }
@@ -150,7 +149,7 @@ export async function runCheckin(slot: CheckinSlot, deps: CheckinDeps = defaultD
     ambientItems.some((i) => !i.detail)
       ? `### Queued one-liners\n${ambientItems.filter((i) => !i.detail).map((i) => `- ${i.line}`).join('\n')}`
       : '',
-    openErrandLines().length ? `### Errands in progress\n${openErrandLines().map((l) => `- ${l}`).join('\n')}` : '',
+    openErrandLines().length ? `### Jobs in progress (waiting on them first)\n${openErrandLines().map((l) => `- ${l}`).join('\n')}` : '',
   ].filter(Boolean).join('\n\n');
 
   let text: string | null;

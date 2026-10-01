@@ -1,6 +1,6 @@
 // Web tasks: anything the owner wants done on a website that isn't a booking
 // (cancel a subscription, export data, change a setting, start a return), done
-// in the owner's own Chrome through the browser bridge. Same machinery as online
+// in their own Chrome through the browser bridge. Same machinery as online
 // booking (src/web-booking.ts): the browser lock, a time-boxed sub-agent whose
 // only tools are the scoped `booking-browser` tools (own tab, no payment
 // fields, no uploads), and a `reply` interrupt with the result.
@@ -13,16 +13,19 @@
 //   - the bot's own idea → propose_action with executor `web_task`, and
 //     runWebTaskAction starts it on "go #action:N".
 
+import { getBotName } from './config.js';
+import { tzAbbrev } from './lib/time.js';
 import {
   proposeAction, confirmAction, markActionExecuting, markActionDone, markActionFailed,
-  getAction, listRecentActions, getMemory, setMemory, deleteMemory,
+  getAction, getExecutingActions, getMemory, setMemory, deleteMemory,
   type Action,
 } from './db.js';
 import { parseNumEnv } from './lib/env.js';
 import { todayET } from './lib/time-et.js';
-import { tzAbbrev } from './lib/time.js';
-import { getBotName } from './config.js';
-import { bookingDeps, runBrowserSubAgent, FORBIDDEN_SHARE, looksLikeCardNumber } from './web-booking.js';
+import { bookingDeps, runBrowserSubAgent, abortBrowserRun, FORBIDDEN_SHARE, looksLikeCardNumber } from './web-booking.js';
+import { openJob, setJobProgress, waitOnOwner, finishJob, takeAnswer, registerJobKind, type WaitNeed } from './jobs.js';
+import { getJob, getJobByRef, patchJob, markActionStopped } from './db.js';
+import { preferencesFor } from './lib/preferences.js';
 
 export interface WebTaskPayload {
   task: string;            // "cancel my PLAUD subscription, after exporting all recordings as audio"
@@ -41,6 +44,7 @@ const TIMEOUT_MS = () => parseNumEnv('WEB_TASK_TIMEOUT_MS', 30 * 60_000);
 const MAX_RUNS = () => parseNumEnv('WEB_TASK_MAX_RUNS', 20);
 const RETRY_GAP_MS = () => parseNumEnv('WEB_TASK_RETRY_GAP_MS', 3 * 60_000);
 const TICK_MS = 5 * 60_000;
+const CHROME_WAIT_TRIES = 20;
 const STATE_GROUP = 'web-task';
 
 export const WEB_TASK_NOT_CONNECTED = "Chrome isn't connected on the mini, so I can't do that online right now.";
@@ -67,8 +71,12 @@ export function prepareWebTask(p: Record<string, unknown>): Prepared {
 }
 
 export interface WebTaskResult {
-  status: 'done' | 'blocked' | 'failed' | 'in_progress';
+  status: 'done' | 'blocked' | 'failed' | 'in_progress' | 'needs_owner';
   summary: string;
+  need?: WaitNeed;
+  ask?: string;
+  ends_on?: string;      // YYYY-MM-DD, when access ends after a cancellation
+  next_charge?: string;  // YYYY-MM-DD, the billing date that should no longer charge
   confirmation?: string;
   url?: string;
 }
@@ -91,21 +99,43 @@ export function parseWebTaskResult(text: string): WebTaskResult {
   }
   if (!obj) return bad('no JSON');
   const status = obj.status;
-  if (status !== 'done' && status !== 'blocked' && status !== 'failed' && status !== 'in_progress') return bad(`status "${String(status)}"`);
-  const summary = typeof obj.summary === 'string' ? obj.summary.trim() : '';
-  if (!summary) return bad('no summary');
+  if (status !== 'done' && status !== 'blocked' && status !== 'failed' && status !== 'in_progress' && status !== 'needs_owner') return bad(`status "${String(status)}"`);
   const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
-  return { status, summary, confirmation: str(obj.confirmation), url: str(obj.url) };
+  const summary = str(obj.summary) ?? (status === 'needs_owner' ? str(obj.ask) ?? '' : '');
+  if (!summary) return bad('no summary');
+  const out: WebTaskResult = { status, summary, confirmation: str(obj.confirmation), url: str(obj.url) };
+  const day = (v: unknown) => { const t = str(v); return t && /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : undefined; };
+  out.ends_on = day(obj.ends_on);
+  out.next_charge = day(obj.next_charge);
+  if (status === 'needs_owner') {
+    const need = String(obj.need ?? '');
+    out.need = (['login', 'code', 'decision', 'info'].includes(need) ? need : guessNeed(summary)) as WaitNeed;
+    out.ask = str(obj.ask) ?? summary;
+  }
+  return out;
 }
 
-export function webTaskPrompt(p: WebTaskPayload, progress: string[] = []): string {
+function prefsFor(...parts: string[]): string {
+  const prefs = preferencesFor(parts.join(' '));
+  return prefs ? `\n\n${prefs}\n` : '';
+}
+
+/** What a "blocked on the owner" summary is asking for. */
+export function guessNeed(text: string): WaitNeed {
+  if (/\b(code|2fa|two-factor|verification|one-time|otp)\b/i.test(text)) return 'code';
+  if (/\b(log ?in|sign ?in|password|logged out|session)\b/i.test(text)) return 'login';
+  if (/\b(decide|choice|which|approve|approval|confirm)\b/i.test(text)) return 'decision';
+  return 'info';
+}
+
+export function webTaskPrompt(p: WebTaskPayload, progress: string[] = [], extra = ''): string {
   const sofar = progress.length
     ? `\n\nEARLIER RUNS OF THIS SAME TASK (pick up where they left off; check the page, don't redo finished items):\n${progress.map((x, i) => `${i + 1}. ${x}`).join('\n')}`
     : '';
   return `You are doing a task on a website for the owner, in their own Chrome. They're signed in to most sites, and a password manager may fill saved logins. Today is ${todayET()} (${tzAbbrev()}).
 
-TASK: ${p.task}
-SITE: ${p.site}${p.share ? `\nDETAILS YOU MAY ENTER (and nothing else): ${p.share}` : ''}${p.notes ? `\nNOTES: ${p.notes}` : ''}${sofar}
+TASK: ${p.task}${prefsFor(p.task, p.site)}
+SITE: ${p.site}${p.share ? `\nDETAILS YOU MAY ENTER (and nothing else): ${p.share}` : ''}${p.notes ? `\nNOTES: ${p.notes}` : ''}${sofar}${extra ? `\n\n${extra}` : ''}
 
 You are ${getBotName()}, their assistant: get it done. The site won't make it obvious; figure it out.
 
@@ -123,18 +153,23 @@ When something doesn't work, try another way before giving up. In order:
 - If one method is too slow for everything (e.g. hundreds of items one at a time), still make steady progress with it and return "in_progress".
 
 Status rules:
-- "blocked" ONLY when it needs the owner: a login or code they must enter, a payment, a decision only they can make, or a company that will only do it by phone or with a person. Say exactly what they need to do.
+- "needs_owner" when only they can unblock it, and the job will wait for their answer (don't navigate away from the page you're on):
+  - need "code": the site sent them a code (text or email). Click "send code" first if there's a button for it. They'll text it to you and you'll be started again here with it.
+  - need "login": a login page their password manager didn't fill. They'll log in on the Mac and tell you.
+  - need "decision": a choice only they can make (which plan, keep or delete). Put the options in "ask".
+  - "ask" is the one short question they'll see, e.g. "Plaud sent you a code. What is it?" or "Plaud wants you to log in on the Mac. Tell me when you're in."
+- "blocked" ONLY for what they can't answer by text: a payment, or a company that will only do it by phone or with a person.
 - Anything else you couldn't do yet (can't find the button, a click did nothing, the page is confusing) is "failed" with what you tried and what to try next. You'll be started again with that note, so the next run tries something different.
 
 Hard rules:
-- Logins: if a login page is filled in, click sign in. If it stays empty, or asks for a password, a code, or a CAPTCHA, STOP with status "blocked" and say which site needs them to log in. Never type or guess a password or code.
+- Logins: if a login page is filled in, click sign in. If it stays empty or asks for a password, return needs_owner login. A code: return needs_owner code, then type it ONLY with enter_owner_code once you have it. Never type or guess a password or code yourself. A CAPTCHA: needs_owner login.
 - NEVER pay, enter a card, or click a pay/upgrade button.
 - When cancelling: decline every offer to stay (discounts, free months, pausing, downgrading) unless NOTES says to take it. Keep going to the final cancel confirmation. If the only way to cancel is a phone call or chat with a person, STOP with status "blocked" and say so.
 - Never delete the account or its data unless TASK says to, in those words. Never change a password or email.
 - Don't create accounts. Don't do anything the task didn't ask for.
 
 Your LAST message must be ONLY this JSON (no other text):
-{"status":"done|in_progress|blocked|failed","summary":"one or two short lines for the owner: what happened, and when it ends if it's a cancellation (for in_progress: what's done and what's left)","confirmation":"confirmation number or email mentioned, if shown","url":"page you ended on"}
+{"status":"done|in_progress|needs_owner|blocked|failed","need":"code|login|decision (needs_owner only)","ask":"their one question (needs_owner only)","summary":"one or two short lines for the owner: what happened, and when it ends if it's a cancellation (for in_progress: what's done and what's left)","confirmation":"confirmation number or email mentioned, if shown","ends_on":"YYYY-MM-DD access ends, if a cancellation page shows it","next_charge":"YYYY-MM-DD the next billing date that should now not charge, if shown","url":"page you ended on"}
 Use "done" only when the page showed the task finished (e.g. "Your subscription has been cancelled").`;
 }
 
@@ -152,7 +187,7 @@ function saveState(id: number, st: RunState): void { setMemory(STATE_GROUP, `tas
 const running = new Set<number>();
 
 // What only the owner can do: log in, pay, decide, or talk to a person.
-const OWNER_NEEDED = /\b(log ?in|sign ?in|password|passcode|verification code|one-time code|2fa|two-factor|captcha|card|payment|pay\b|deposit|billing info|phone|call (them|us|support)|by phone|live chat|chat with|speak (to|with)|agent|representative|(his|her|their|the owner's) (decision|choice|approval)|decide|which one|verify (your|his) identity|identity)\b/i;
+const OWNER_NEEDED = /\b(log ?in|sign ?in|password|passcode|verification code|one-time code|2fa|two-factor|captcha|card|payment|pay\b|deposit|billing info|phone|call (them|us|support)|by phone|live chat|chat with|speak (to|with)|agent|representative|their (decision|choice|approval)|decide|which one|verify (your|their) identity|identity)\b/i;
 export function needsOwner(summary: string): boolean { return OWNER_NEEDED.test(summary); }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -166,20 +201,48 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
   if (running.has(actionId)) return { status: 'in_progress', summary: 'already running' };
   running.add(actionId);
   const d = bookingDeps();
+  const ref = `action:${actionId}`;
+  let job = getJobByRef(ref);
+  if (job?.status === 'waiting_on_you') { running.delete(actionId); return { status: 'needs_owner', summary: job.ask ?? 'waiting on the owner' }; }
+  const jobId = job && ['working', 'waiting_on_you'].includes(job.status) ? job.id : openJob('web_task', getAction(actionId)?.summary ?? p.task, ref);
   markActionExecuting(actionId);
   const st = loadState(actionId);
   let result: WebTaskResult = { status: 'failed', summary: 'Never started.' };
   try {
     while (st.runs < MAX_RUNS()) {
       if (getAction(actionId)?.status === 'cancelled') return { status: 'failed', summary: 'cancelled' };
+      // No Chrome: wait for it (chrome-health reopens it and alerts) without
+      // spending one of the job's runs, up to about an hour.
+      let waited = 0;
+      while (!d.isConnected() && waited < CHROME_WAIT_TRIES) {
+        if (getAction(actionId)?.status === 'cancelled') return { status: 'failed', summary: 'cancelled' };
+        waited++;
+        await sleep(RETRY_GAP_MS());
+      }
       st.runs++;
       saveState(actionId, st);
       if (!d.isConnected()) {
-        result = { status: 'failed', summary: "Chrome wasn't connected on the mini." };
+        result = { status: 'failed', summary: "Chrome on the mini wasn't connected for about an hour." };
       } else {
         try {
           const timeoutMs = TIMEOUT_MS();
-          const out = await runBrowserSubAgent(`web-task #${actionId}`, webTaskPrompt(p, st.progress), timeoutMs);
+          // Their answer to the last question goes into this run once; a texted
+          // code never does (enter_owner_code types it from the job).
+          job = getJob(jobId);
+          const answered = takeAnswer(jobId);
+          const extra = answered
+            ? `THE OWNER ANSWERED your question "${answered.ask}": ${answered.answer}\nContinue from where you are.`
+            : job?.waiting_for === 'code' && job.answer
+              ? `THE OWNER SENT THE CODE. At the code field, call enter_owner_code with that field's selector, then continue.`
+              : '';
+          activeRun = { actionId, jobId, codeHost: job?.code_host ?? null };
+          let out: string | null;
+          try {
+            out = await runBrowserSubAgent(`web-task #${actionId}`, webTaskPrompt(p, st.progress, extra), timeoutMs);
+          } finally {
+            activeRun = null;
+          }
+          if (job?.waiting_for) patchJob(jobId, { waiting_for: null, ask: null, answer: null });
           result = out === null
             ? { status: 'in_progress', summary: `A run hit the ${Math.round(timeoutMs / 60_000)}-min limit; check the page for what's done.` }
             : parseWebTaskResult(out);
@@ -187,12 +250,28 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
           result = { status: 'failed', summary: `Browser error: ${err instanceof Error ? err.message : String(err)}` };
         }
       }
-      // "Blocked" means the owner has to do something. The sub-agent sometimes says
-      // blocked when it just couldn't find the way; that's a retry, not a stop.
-      if (result.status === 'blocked' && !needsOwner(result.summary)) {
+      // Stopped while that run was going: end quietly (they already knows).
+      if (getAction(actionId)?.status === 'cancelled') return { status: 'failed', summary: 'stopped' };
+      // "Blocked" means they have to do something. A login or code they can sort by
+      // text is a wait, not a stop; and the sub-agent sometimes says blocked
+      // when it just couldn't find the way, which is a retry.
+      if (result.status === 'blocked' && /\b(code|2fa|two-factor|verification|log ?in|sign ?in|password|captcha)\b/i.test(result.summary)) {
+        result = { ...result, status: 'needs_owner', need: guessNeed(result.summary), ask: result.summary };
+      } else if (result.status === 'blocked' && !needsOwner(result.summary)) {
         result = { ...result, status: 'failed', summary: `${result.summary} (Not actually blocked on the owner: try a different way.)` };
       }
+      if (result.status === 'needs_owner') {
+        const need = result.need ?? 'info';
+        const host = need === 'code' ? await hostReader().catch(() => null) : null;
+        waitOnOwner(jobId, need, result.ask ?? result.summary, host);
+        st.progress = [...st.progress, `Run ${st.runs} (paused for the owner): ${result.summary}`].slice(-10);
+        st.runs = Math.max(0, st.runs - 1); // waiting on them doesn't use up a try
+        saveState(actionId, st);
+        try { await d.notify(result.ask ?? result.summary, `web-task:${actionId}:ask`); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
+        return result;
+      }
       if (result.status === 'done' || result.status === 'blocked') break;
+      if (result.status === 'in_progress') setJobProgress(jobId, result.summary);
       st.progress = [...st.progress, `Run ${st.runs} (${result.status === 'in_progress' ? 'progress' : "didn't work"}): ${result.summary}`].slice(-10);
       // Real progress continues right away; a failure waits a few minutes first.
       st.nextAt = Date.now() + (result.status === 'in_progress' ? 0 : RETRY_GAP_MS());
@@ -208,13 +287,17 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
     const conf = result.confirmation ? ` (${result.confirmation})` : '';
     text = `✅ ${result.summary}${conf}`;
     markActionDone(actionId, { outcome: `${result.summary}${conf}`, outcome_url: result.url ?? null, actual_cost_cents: 0 });
+    finishJob(jobId, 'done', `${result.summary}${conf}`);
+    for (const hook of afterDone) { try { hook(jobId, p, result); } catch (err) { console.error('[web-task] after-done hook failed:', err); } }
   } else if (result.status === 'blocked') {
     text = `Stuck on ${p.site}: ${result.summary}`;
     markActionFailed(actionId, `blocked: ${result.summary}`);
+    finishJob(jobId, 'failed', result.summary);
   } else {
     const last = (st.progress.at(-1) ?? result.summary).replace(/^Run \d+ \([^)]*\): /, '');
     text = `Couldn't finish on ${p.site} after ${st.runs} tries. Last: ${last}`;
     markActionFailed(actionId, `gave up: ${last}`);
+    finishJob(jobId, 'failed', last);
   }
   deleteMemory(STATE_GROUP, `task_${actionId}`);
   try {
@@ -228,14 +311,53 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
 /** Picks back up any web task the process dropped (a restart mid-job). */
 export function resumeWebTasks(now = Date.now()): number {
   let resumed = 0;
-  for (const a of listRecentActions(100)) {
-    if (a.kind !== 'web_task' || a.status !== 'executing' || running.has(a.id)) continue;
+  for (const a of getExecutingActions('web_task')) {
+    if (running.has(a.id)) continue;
+    if (getJobByRef(`action:${a.id}`)?.status === 'waiting_on_you') continue;
     if (loadState(a.id).nextAt > now) continue;
     void runWebTask(a.id, JSON.parse(a.payload_json) as WebTaskPayload);
     resumed++;
   }
   return resumed;
 }
+
+// ── Tracker hooks, the running job, and the page's host ────────────────────
+
+let activeRun: { actionId: number; jobId: number; codeHost: string | null } | null = null;
+/** The job whose browser run is open right now (read by enter_owner_code). */
+export function activeWebTaskRun(): { actionId: number; jobId: number; codeHost: string | null } | null { return activeRun; }
+
+/** Runs after a job finishes well (follow-up watches hook in here). */
+const afterDone: Array<(jobId: number, p: WebTaskPayload, r: WebTaskResult) => void> = [];
+export function onWebTaskDone(fn: (jobId: number, p: WebTaskPayload, r: WebTaskResult) => void): void { afterDone.push(fn); }
+
+let hostReader: () => Promise<string | null> = async () => {
+  const { browserTools } = await import('./tools/browser.js');
+  const out = String(await browserTools[0].handler({ action: 'get_current_url' }, { groupKey: 'booking' }));
+  try { return new URL((JSON.parse(out) as { url?: string }).url ?? '').hostname; } catch { return null; }
+};
+/** Tests swap in a fake page host. */
+export function setWebTaskHostReader(fn: (() => Promise<string | null>) | null): void {
+  if (fn) hostReader = fn;
+}
+
+registerJobKind('web_task', {
+  resume: (job) => {
+    const actionId = Number(job.ref?.split(':')[1]);
+    const a = getAction(actionId);
+    if (!a || a.status !== 'executing') return;
+    void runWebTask(actionId, JSON.parse(a.payload_json) as WebTaskPayload);
+  },
+  stop: (job) => {
+    const actionId = Number(job.ref?.split(':')[1]);
+    markActionStopped(actionId, 'stopped by the owner');
+    // Close the browser window now: every browser tool refuses, the run ends.
+    if (activeRun?.actionId === actionId) abortBrowserRun();
+    deleteMemory(STATE_GROUP, `task_${actionId}`);
+    finishJob(job.id, 'stopped', 'Stopped by the owner.');
+    return `Stopped: ${job.title.replace(/\.$/, '')}. Nothing more will happen there.`;
+  },
+});
 
 export function startWebTaskRunner(): void {
   setTimeout(() => { resumeWebTasks(); }, 20_000);

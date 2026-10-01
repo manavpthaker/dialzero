@@ -26,6 +26,7 @@ import { callOwner, isPhoneConfigured, preparePlaceCall, runPlaceCall } from '..
 import { prepareErrand, runErrandAction } from '../errands.js';
 import { prepareWebBooking, runWebBookingAction } from '../web-booking.js';
 import { prepareWebTask, runWebTaskAction } from '../web-task.js';
+import { runEmailErrandAction } from './followups.js';
 
 type ExecutorResult = { outcome: string; outcome_url?: string; actual_cost_cents: number };
 type Executor = (action: Action) => Promise<ExecutorResult>;
@@ -57,6 +58,8 @@ const EXECUTORS: Record<string, Executor> = {
   web_booking: runWebBookingAction,
   // A website task in Chrome (src/web-task.ts): cancel, export, change a setting.
   web_task: runWebTaskAction,
+  // Email a company and see it through (src/followups.ts).
+  email_errand: (a) => runEmailErrandAction(a),
 };
 
 // Executors whose payload is validated and whose summary is written here, not by

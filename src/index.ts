@@ -20,6 +20,9 @@ import { startPhone } from './phone.js';
 import { startErrands } from './errands.js';
 import { startWakeUpCalls } from './wakeup.js';
 import { startWebTaskRunner } from './web-task.js';
+import { startFollowups } from './followups.js';
+import { recordRunningSha } from './lib/running-sha.js';
+import { startChromeHealth } from './lib/chrome-health.js';
 import { startCheckins } from './checkins.js';
 import { automationsOff, automationAllowed } from './lib/automations-off.js';
 import { withLlmContext } from './lib/llm-context.js';
@@ -53,6 +56,8 @@ async function sendIfAudienceStillApproved(
 }
 
 async function main() {
+  // Lets a restart check see which commit is running (doctor flags a mismatch).
+  recordRunningSha();
   console.log('[assistant] Starting...');
 
   // Initialize users and groups from .env
@@ -83,6 +88,10 @@ async function main() {
     ['wakeup', startWakeUpCalls],
     // Website jobs the owner started keep going across restarts until done.
     ['web-task', startWebTaskRunner],
+    // Pings the Chrome extension each minute, reopens Chrome, reloads an outdated extension.
+    ['chrome-health', startChromeHealth],
+    // Follow-ups after "done" and email threads with companies, until settled.
+    ['followups', startFollowups],
   ];
   for (const [key, start] of services) {
     if (!isOwnedOn('start', key)) continue;

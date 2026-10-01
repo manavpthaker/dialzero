@@ -712,6 +712,31 @@ const schedulingMigrations = [
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now'))
   )`,
+  // The job tracker (src/jobs.ts): everything the bot is doing or watching for
+  // the owner, in plain words. Engines keep their own ledgers (actions, errands);
+  // a job is the owner-facing record plus waiting-on-you and follow-up state.
+  `CREATE TABLE IF NOT EXISTS jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    title         TEXT NOT NULL,
+    kind          TEXT NOT NULL,          -- web_task | booking | email_thread | watch
+    ref           TEXT,                   -- e.g. action:37
+    status        TEXT NOT NULL DEFAULT 'working', -- working | waiting_on_you | watching | done | failed | stopped
+    progress      TEXT,
+    waiting_for   TEXT,                   -- login | code | decision | info
+    ask           TEXT,
+    answer        TEXT,
+    answered_at   TEXT,
+    code_host     TEXT,                   -- site a texted code may be typed into
+    next_check_at TEXT,                   -- ISO UTC
+    check_spec    TEXT,                   -- JSON, for watches and email threads
+    parent_id     INTEGER,
+    outcome       TEXT,
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now')),
+    finished_at   TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)`,
+  `CREATE INDEX IF NOT EXISTS idx_jobs_ref ON jobs(ref)`,
 ];
 for (const sql of schedulingMigrations) {
   try { db.exec(sql); } catch { /* column already exists */ }
@@ -763,13 +788,17 @@ export function saveMessage(
     const sqliteCreatedAt = new Date(timestamp).toISOString()
       .replace('T', ' ')
       .replace(/\.\d{3}Z$/, '');
-    db.prepare(
+    return db.prepare(
       'INSERT INTO messages (group_id, sender, role, content, created_at) VALUES (?, ?, ?, ?, ?)',
-    ).run(groupId, sender, role, content, sqliteCreatedAt);
-    return;
+    ).run(groupId, sender, role, content, sqliteCreatedAt).lastInsertRowid as number;
   }
-  db.prepare('INSERT INTO messages (group_id, sender, role, content) VALUES (?, ?, ?, ?)')
-    .run(groupId, sender, role, content);
+  return db.prepare('INSERT INTO messages (group_id, sender, role, content) VALUES (?, ?, ?, ?)')
+    .run(groupId, sender, role, content).lastInsertRowid as number;
+}
+
+/** Add a note to a saved message (e.g. what an attached photo showed). */
+export function appendToMessage(id: number, text: string): void {
+  db.prepare('UPDATE messages SET content = content || ? WHERE id = ?').run(text, id);
 }
 
 export function getRecentMessages(groupId: string, limit = 75): { role: string; content: string }[] {
@@ -4087,6 +4116,13 @@ export function listRecentActions(limit = 20): Action[] {
   ).all(limit) as Action[];
 }
 
+/** Actions of one kind that are still running (e.g. web tasks to resume after a restart). */
+export function getExecutingActions(kind: string): Action[] {
+  return db.prepare(
+    "SELECT * FROM actions WHERE kind = ? AND status = 'executing' ORDER BY id"
+  ).all(kind) as Action[];
+}
+
 // Edit-in-place while still 'proposed' (the `edit #action:N` path). Refreshes the
 // frozen payload + derived summary/estimate; never advances status.
 export function updateActionProposal(id: number, fields: {
@@ -4337,6 +4373,78 @@ export function getLlmModelsSince(since: Date): string[] {
     "SELECT DISTINCT model FROM llm_usage WHERE created_at >= ? AND provider = 'openai'",
   ).all(toSqliteDate(since)) as Array<{ model: string }>;
   return rows.map((r) => r.model);
+}
+
+// ── Jobs (src/jobs.ts) ──────────────────────────────────────────────────────
+
+export interface JobRow {
+  id: number;
+  title: string;
+  kind: string;
+  ref: string | null;
+  status: string;
+  progress: string | null;
+  waiting_for: string | null;
+  ask: string | null;
+  answer: string | null;
+  answered_at: string | null;
+  code_host: string | null;
+  next_check_at: string | null;
+  check_spec: string | null;
+  parent_id: number | null;
+  outcome: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export function insertJob(j: { title: string; kind: string; ref?: string | null; status?: string; next_check_at?: string | null; check_spec?: string | null; parent_id?: number | null }): number {
+  const r = db.prepare(
+    `INSERT INTO jobs (title, kind, ref, status, next_check_at, check_spec, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(j.title, j.kind, j.ref ?? null, j.status ?? 'working', j.next_check_at ?? null, j.check_spec ?? null, j.parent_id ?? null);
+  return r.lastInsertRowid as number;
+}
+
+export function getJob(id: number): JobRow | undefined {
+  return db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRow | undefined;
+}
+
+export function getJobByRef(ref: string): JobRow | undefined {
+  return db.prepare('SELECT * FROM jobs WHERE ref = ? ORDER BY id DESC LIMIT 1').get(ref) as JobRow | undefined;
+}
+
+const JOB_COLUMNS = ['title', 'status', 'progress', 'waiting_for', 'ask', 'answer', 'answered_at', 'code_host', 'next_check_at', 'check_spec', 'outcome', 'finished_at'] as const;
+export function patchJob(id: number, patch: Partial<Pick<JobRow, typeof JOB_COLUMNS[number]>>): void {
+  const keys = (Object.keys(patch) as Array<keyof typeof patch>).filter((k) => (JOB_COLUMNS as readonly string[]).includes(k));
+  if (!keys.length) return;
+  db.prepare(`UPDATE jobs SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+    .run(...keys.map((k) => patch[k] ?? null), id);
+}
+
+/** Jobs not finished, newest first. */
+export function listOpenJobRows(limit = 30): JobRow[] {
+  return db.prepare(
+    `SELECT * FROM jobs WHERE status IN ('working', 'waiting_on_you', 'watching') ORDER BY id DESC LIMIT ?`
+  ).all(limit) as JobRow[];
+}
+
+/** Watches and email threads whose next check is due. */
+export function getDueJobs(nowIso: string): JobRow[] {
+  return db.prepare(
+    `SELECT * FROM jobs WHERE status IN ('watching', 'working') AND next_check_at IS NOT NULL AND next_check_at <= ? ORDER BY next_check_at`
+  ).all(nowIso) as JobRow[];
+}
+
+/** Recently finished jobs, for "what did you get done". */
+export function listRecentJobRows(sinceIso: string, limit = 20): JobRow[] {
+  return db.prepare(
+    `SELECT * FROM jobs WHERE status IN ('done', 'failed', 'stopped') AND finished_at >= ? ORDER BY finished_at DESC LIMIT ?`
+  ).all(sinceIso, limit) as JobRow[];
+}
+
+/** A running action stopped by the owner (cancelAction only covers proposals). */
+export function markActionStopped(id: number, why: string): void {
+  db.prepare("UPDATE actions SET status = 'cancelled', error = ?, executed_at = datetime('now') WHERE id = ? AND status IN ('confirmed', 'executing')").run(why, id);
 }
 
 export default db;

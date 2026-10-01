@@ -79,7 +79,7 @@ try {
     browserReply = '{"status":"blocked","summary":"Cancel is phone-only."}';
     const out = String(await doOnline.handler(base, ctx));
     assert.match(out, /Go\?/);
-    assert.doesNotMatch(out.split('(For you only')[0], /#|action/i, 'no action numbers in what he sees');
+    assert.doesNotMatch(out.split('(For you only')[0], /#|action/i, 'no action numbers in what they see');
     const id = Number(out.match(/action id (\d+)/)![1]);
     assert.equal(db.getAction(id)!.status, 'proposed');
     await confirm.handler({ id }, ctx);
@@ -119,7 +119,7 @@ try {
     });
   });
 
-  await check('"stuck" only when it needs him; otherwise it tries another way', async () => {
+  await check('"stuck" only when it needs them; otherwise it tries another way', async () => {
     assert.ok(wt.needsOwner('PLAUD wants you to log in again.'));
     assert.ok(wt.needsOwner('Cancelling is phone-only: call support.'));
     assert.ok(wt.needsOwner('It asks for a card to continue.'));
@@ -153,6 +153,16 @@ try {
     });
   });
 
+  await check('restart: a running job is picked back up', async () => {
+    const id = db.proposeAction({ kind: 'web_task', tool_name: 'web_task', summary: 'x', payload_json: JSON.stringify(base), estimated_cost_cents: null, reversible: false, category: 'web_task', created_by_group: 'admin' });
+    db.confirmAction(id);
+    db.markActionExecuting(id);
+    browserReply = doneJson;
+    assert.equal(wt.resumeWebTasks(), 1);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(db.getAction(id)!.status, 'done');
+  });
+
   await check('Chrome down: refuses up front', async () => {
     connected = false;
     assert.match(String(await doOnline.handler({ ...base, owner_request: 'cancel Plaud' }, ctx)), /isn't connected/);
@@ -162,7 +172,7 @@ try {
   await check('desktop task refuses a website plan; still takes desktop plans', () => {
     assert.ok(looksLikeWebTask('Export all available PLAUD recordings as audio, verify the exports complete, then open subscription settings and cancel the PLAUD plan.'));
     assert.ok(looksLikeWebTask('Go to https://web.plaud.ai and export'));
-    assert.ok(!looksLikeWebTask('Open the LastPass extension menu and pick the PLAUD login'));
+    assert.ok(!looksLikeWebTask('Open the password manager extension menu and pick the PLAUD login'));
     assert.ok(!looksLikeWebTask('Open Finder and move the exports to Documents'));
   });
 

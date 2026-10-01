@@ -1,4 +1,7 @@
 import { existsSync, readdirSync, statSync } from 'fs';
+import { isBrowserConnected, browserBridgeStarted } from './browser-bridge.js';
+import { chromeDownForMs } from './lib/chrome-health.js';
+import { readRunningSha, currentHeadSha } from './lib/running-sha.js';
 import { execSync } from 'child_process';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
@@ -185,6 +188,14 @@ function checkBackup(): Check {
 //      `git pull` fetches before the ff it then rejects, so the remote-tracking
 //      ref is fresh and this needs no network from the health check itself.
 // Surfaces in the 09:00 alive-ping so a stuck deploy is seen by morning.
+// Chrome bridge: only meaningful inside the bot process (the CLI has no bridge).
+function checkChrome(): Check {
+  if (!browserBridgeStarted()) return { name: 'chrome', status: 'ok', detail: 'not checked (bridge not running in this process)' };
+  const down = chromeDownForMs();
+  if (isBrowserConnected() && down === 0) return { name: 'chrome', status: 'ok', detail: 'extension connected' };
+  return { name: 'chrome', status: 'warn', detail: `extension not connected${down ? ` for ${Math.round(down / 60_000)} min` : ''} — website jobs are paused` };
+}
+
 function checkSync(): Check {
   let behind: number | null = null;
   try {
@@ -208,6 +219,15 @@ function checkSync(): Check {
   const error = rows.find((r) => r.key === 'sync_last_error');
   const okAge = hoursSince(success?.updated_at);
   const errAge = hoursSince(error?.updated_at);
+
+  // The bot is running an older commit than the checkout (a commit made on the
+  // mini, or a restart that never happened). The sync job fixes this within 5
+  // minutes when it's alive, so a lasting mismatch means it isn't.
+  const running = readRunningSha();
+  const head = currentHeadSha();
+  if (running && head && running !== head) {
+    return { name: 'deploy sync', status: 'warn', detail: `running ${running.slice(0, 7)} but checkout is ${head.slice(0, 7)} — restart pending or sync agent not running` };
+  }
 
   // HEAD behind origin is unambiguous — lead with it and attach the reason.
   if (behind !== null && behind > 0) {
@@ -630,6 +650,7 @@ export function runHealthCheck(): HealthReport {
   checks.push(...checkMorningJobs());
   checks.push(checkMemoryAudit());
   checks.push(checkSync());
+  checks.push(checkChrome());
   checks.push(...checkDaemonTicks());
   const localLlm = checkLocalLlm();
   if (localLlm) checks.push(localLlm);

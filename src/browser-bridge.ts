@@ -23,6 +23,7 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  quiet?: boolean;
 }
 
 let wss: WebSocketServer | null = null;
@@ -95,10 +96,10 @@ export function startBrowserBridge(): void {
 
       const result = typed.result as Record<string, unknown> | undefined;
       if (result && typeof result === 'object' && 'error' in result) {
-        console.log(`[browser-bridge] ← error: ${(result as { error: string }).error}`);
+        if (!req2.quiet) console.log(`[browser-bridge] ← error: ${(result as { error: string }).error}`);
         req2.reject(new Error(result.error as string));
       } else {
-        console.log(`[browser-bridge] ← ok ${JSON.stringify(result).slice(0, 200)}`);
+        if (!req2.quiet) console.log(`[browser-bridge] ← ok ${JSON.stringify(result).slice(0, 200)}`);
         req2.resolve(result);
       }
     });
@@ -123,6 +124,10 @@ export function startBrowserBridge(): void {
   });
 }
 
+export function browserBridgeStarted(): boolean {
+  return wss !== null;
+}
+
 export function isBrowserConnected(): boolean {
   return extensionSocket !== null && extensionSocket.readyState === 1; // WebSocket.OPEN
 }
@@ -130,7 +135,8 @@ export function isBrowserConnected(): boolean {
 export function sendCommand(
   action: string,
   params: Record<string, unknown> = {},
-  timeoutMs: number = DEFAULT_TIMEOUT
+  timeoutMs: number = DEFAULT_TIMEOUT,
+  quiet = false,
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (!isBrowserConnected()) {
@@ -147,9 +153,9 @@ export function sendCommand(
       reject(new Error(`Browser command timed out after ${timeoutMs}ms: ${action}`));
     }, timeoutMs);
 
-    pending.set(id, { resolve, reject, timer });
+    pending.set(id, { resolve, reject, timer, quiet });
 
-    console.log(`[browser-bridge] → ${action}`, JSON.stringify(params).slice(0, 200));
+    if (!quiet) console.log(`[browser-bridge] → ${action}`, JSON.stringify(params).slice(0, 200));
     extensionSocket!.send(JSON.stringify({ id, action, params }));
   });
 }

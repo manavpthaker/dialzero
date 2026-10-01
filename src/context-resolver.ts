@@ -1,4 +1,5 @@
 import { readFileSync, existsSync, readdirSync } from 'fs';
+import { waitingBlock } from './jobs.js';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -689,6 +690,11 @@ export function loadSystemBlocks(
     }
   }
   const taskState = isSharedAudience ? '' : getTaskState();
+  // Jobs paused on the owner (a code, a login, a choice), so a bare reply like
+  // "482913" or "done" reaches the right job.
+  if (user.tone === 'direct' && !isSharedAudience) {
+    try { const w = waitingBlock(); if (w) dynamicParts.push(`\n${w}`); } catch { /* tracker unavailable */ }
+  }
   if (taskState) dynamicParts.push(taskState);
 
   // Recent Memory (surfaces persistent state so memory isn't write-only)

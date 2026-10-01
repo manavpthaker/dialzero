@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.running-sha
 .env
 # Any .env backup/variant carries live secrets — never commit. (.env.example is
 # already tracked, so this only catches new variants like .env.bak.<ts>, .env.local)
