@@ -284,7 +284,7 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
       if (result.status === 'in_progress') setJobProgress(jobId, result.summary);
       st.progress = [...st.progress, `Run ${st.runs} (${result.status === 'in_progress' ? 'progress' : "didn't work"}): ${result.summary}`].slice(-10);
       // The same wall three runs in a row: more runs won't change it. Stop
-      // and ask him, with the routes left (email them, do it himself, skip it).
+      // and ask the owner, with the routes left (email them, do it themselves, skip it).
       if (result.status === 'failed' && sameWall(st.progress)) {
         const ask = `${p.site.replace(/^https?:\/\//, '').replace(/\/.*$/, '')} keeps hitting the same wall: ${result.summary.replace(/\s*\(Not actually blocked[^)]*\)/, '')} Want me to email their support instead, or skip this part?`;
         waitOnOwner(jobId, 'decision', ask);
