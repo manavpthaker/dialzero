@@ -5,6 +5,7 @@
 import { proposalText } from '../lib/proposal-text.js';
 import type { ToolDef, ToolContext } from './index.js';
 import { proposeAction, getAction } from '../db.js';
+import { activeWebTaskRun } from '../web-task.js';
 import { checkActionsEnabled } from '../lib/spend-cap.js';
 import { ownerAskedForBooking } from '../lib/owner-request.js';
 import { browserTools } from './browser.js';
@@ -70,12 +71,26 @@ After calling this, tell the owner the returned line (for a proposal, DM the exa
 // while a booking run holds the browser, pinned to their own tab, and unable to
 // touch a payment field.
 const BOOKING_BROWSER_NAMES = new Set(['browser_action', 'browser_navigate']);
+
+/** Files the owner listed for the website job that's running (payload.files). */
+function jobFiles(): string[] {
+  const run = activeWebTaskRun();
+  if (!run) return [];
+  try { return ((JSON.parse(getAction(run.actionId)?.payload_json ?? '{}') as { files?: string[] }).files ?? []).map(String); } catch { return []; }
+}
 export const bookingBrowserTools: ToolDef[] = browserTools
   .filter((t) => BOOKING_BROWSER_NAMES.has(t.definition.name))
   .map((t) => ({
     definition: t.definition,
     handler: async (input: Record<string, unknown>, context?: ToolContext) => {
       if (!bookingWindowOpen()) return 'Refused: the booking window is closed. Stop and return your JSON result now.';
+      if (input.action === 'set_files') {
+        const allowed = jobFiles();
+        const asked = Array.isArray(input.paths) ? input.paths.map(String) : [];
+        if (!asked.length || asked.some((p) => !allowed.includes(p))) {
+          return `Refused: only the files the owner gave for this job can be uploaded${allowed.length ? ` (${allowed.join(', ')})` : ' (none were given)'}. If the site needs a file, return needs_owner info asking which file.`;
+        }
+      }
       const refusal = paymentRefusal(input);
       if (refusal) return refusal;
       // Clicks carry the pay-button rule into Chrome, where the real element's

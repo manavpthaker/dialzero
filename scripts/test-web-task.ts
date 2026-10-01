@@ -192,6 +192,33 @@ try {
     });
   });
 
+  await check('uploads: only the listed files, from the owner folders; the desktop tool only during a job', async () => {
+    const { checkUploadPaths } = await import('../src/tools/browser.js');
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const dl = join(process.env.HOME!, 'Downloads');
+    mkdirSync(dl, { recursive: true });
+    const receipt = join(dl, '.bb-test-receipt.pdf');
+    writeFileSync(receipt, 'x');
+    try {
+      assert.equal(checkUploadPaths([receipt]), null);
+      assert.match(checkUploadPaths(['/etc/hosts'])!, /outside Downloads/);
+      assert.match(checkUploadPaths([join(process.env.HOME!, '.ssh/id_rsa')])!, /not allowed/);
+      assert.match(checkUploadPaths([join(dl, 'nope-404.pdf')])!, /doesn't exist/);
+      await new Promise((r) => setTimeout(r, 50)); // late-bound check loads
+      assert.ok('error' in wt.prepareWebTask({ ...base, files: ['/etc/hosts'] }));
+      const ok = wt.prepareWebTask({ ...base, files: [receipt] });
+      assert.ok('payload' in ok && (ok.payload as { files?: string[] }).files?.[0] === receipt);
+      const bb = toolRegistry['booking-browser'];
+      const browserAct = bb.find((t) => t.definition.name === 'browser_action')!;
+      assert.match(String(await browserAct.handler({ action: 'set_files', paths: [receipt] }, { groupKey: 'booking' })), /Refused|window is closed/);
+      const desktop = bb.find((t) => t.definition.name === 'desktop')!;
+      assert.match(String(await desktop.handler({ action: 'screenshot' }, { groupKey: 'booking' })), /no website job is running/);
+    } finally {
+      const { rmSync: rm } = await import('node:fs');
+      rm(receipt, { force: true });
+    }
+  });
+
   await check('Chrome down: refuses up front', async () => {
     connected = false;
     assert.match(String(await doOnline.handler({ ...base, owner_request: 'cancel Plaud' }, ctx)), /isn't connected/);

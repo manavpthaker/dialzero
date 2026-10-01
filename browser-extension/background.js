@@ -104,6 +104,7 @@ async function handleAction(action, params) {
     case 'real_click':        return await doRealClick(params);
     case 'real_type':         return await doRealType(params);
     case 'real_key':          return await doRealKey(params);
+    case 'set_files':         return await doSetFiles(params);
     case 'reload_extension':  setTimeout(() => chrome.runtime.reload(), 300); return { reloading: true };
     case 'version':           return { version: chrome.runtime.getManifest().version };
     default:
@@ -551,6 +552,60 @@ async function doRealType({ value, fieldGuard, tabId }) {
   }
   await cdp(tab.id, 'Input.insertText', { text: String(value) });
   return { typed: String(value).length, field: field.trim().slice(0, 80) };
+}
+
+// ── set_files: attach files to an upload without opening the file picker ──
+// A file <input> gets the files directly; a button that would open the picker
+// is clicked with the picker intercepted, and the files go to that input.
+// Paths are checked by the caller (the owner's listed files only).
+
+const fileChooserWaiters = new Map(); // tabId -> resolve(backendNodeId)
+chrome.debugger.onEvent.addListener((src, method, params) => {
+  if (method === 'Page.fileChooserOpened' && fileChooserWaiters.has(src.tabId)) {
+    fileChooserWaiters.get(src.tabId)(params.backendNodeId);
+    fileChooserWaiters.delete(src.tabId);
+  }
+});
+
+async function doSetFiles({ index, selector, paths, tabId }) {
+  const tab = await getTab(tabId);
+  const files = Array.isArray(paths) ? paths.map(String) : [];
+  if (!files.length) return { error: 'paths is required' };
+  // 1) A file input we can name directly (main page).
+  if (selector) {
+    const doc = await cdp(tab.id, 'DOM.getDocument', { depth: 0 });
+    const q = await cdp(tab.id, 'DOM.querySelector', { nodeId: doc.root.nodeId, selector });
+    if (q && q.nodeId) {
+      const desc = await cdp(tab.id, 'DOM.describeNode', { nodeId: q.nodeId });
+      if (desc.node && desc.node.nodeName === 'INPUT') {
+        await cdp(tab.id, 'DOM.setFileInputFiles', { files, nodeId: q.nodeId });
+        return { attached: files.length, via: 'input' };
+      }
+    }
+  }
+  // 2) Click the upload button with the picker intercepted.
+  await cdp(tab.id, 'Page.enable');
+  await cdp(tab.id, 'Page.setInterceptFileChooserDialog', { enabled: true });
+  try {
+    const opened = new Promise((resolve) => { fileChooserWaiters.set(tab.id, resolve); setTimeout(() => resolve(null), 6000); });
+    let pt = null;
+    if (index != null) pt = await pointOfIndex(tab, index);
+    else if (selector) {
+      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (sel) => { const el = document.querySelector(sel); if (!el) return null; el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }, args: [selector] });
+      pt = result;
+    }
+    if (!pt) return { error: 'set_files needs a file input selector, or the upload button (index or selector).' };
+    const base = { x: Math.round(pt.x), y: Math.round(pt.y), button: 'left', clickCount: 1 };
+    await cdp(tab.id, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' });
+    await cdp(tab.id, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' });
+    const backendNodeId = await opened;
+    if (!backendNodeId) return { error: 'No file picker opened from that click. Find the upload button or file input with snapshot.' };
+    await cdp(tab.id, 'DOM.setFileInputFiles', { files, backendNodeId });
+    return { attached: files.length, via: 'picker' };
+  } finally {
+    fileChooserWaiters.delete(tab.id);
+    await cdp(tab.id, 'Page.setInterceptFileChooserDialog', { enabled: false }).catch(() => {});
+  }
 }
 
 async function doRealKey({ key, tabId }) {

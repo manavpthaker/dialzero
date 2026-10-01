@@ -10,7 +10,7 @@ import { getTimezone } from '../config.js';
 import { proposeAction, getAction } from '../db.js';
 import { checkActionsEnabled } from '../lib/spend-cap.js';
 import { ownerAskedForWebTask } from '../lib/owner-request.js';
-import { bookingDeps } from '../web-booking.js';
+import { bookingDeps, looksLikeCardNumber } from '../web-booking.js';
 import { prepareWebTask, startWebTask, activeWebTaskRun, WEB_TASK_NOT_CONNECTED, type WebTaskPayload } from '../web-task.js';
 import { takeCode, takeLink, matchItem, answerItem } from '../jobs.js';
 import { bookingWindowOpen } from '../web-booking.js';
@@ -33,6 +33,7 @@ After calling this, tell the owner the returned line in one short sentence (for 
           task: { type: 'string', description: 'What to get done, in order, e.g. "export all recordings as audio, then cancel the PLAUD subscription".' },
           site: { type: 'string', description: 'URL or service name, e.g. "https://web.plaud.ai" or "PLAUD".' },
           share: { type: 'string', description: 'Details it may enter, with values (e.g. a reason for cancelling). Never card, bank, ID, or passwords. Optional.' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Absolute paths of files it may upload (a receipt, a photo, a form), from their Downloads, Desktop or Documents. Optional.' },
           notes: { type: 'string', description: 'Anything else, e.g. "take the free month if offered". Optional.' },
         },
         required: ['task', 'site'],
@@ -154,5 +155,35 @@ export const openSignInLinkTool: ToolDef = {
     const out = String(await browserTools[0].handler({ action: 'navigate', url: link }, { groupKey: 'booking' }));
     // Keep the token out of the transcript: drop URLs from what comes back.
     return `Opened the sign-in link.\n${out.replace(/https?:\/\/\S+/g, '[link]').slice(0, 3000)}`;
+  },
+};
+
+// For the web-task sub-agent: desktop control for the few Chrome/macOS windows
+// the page tools can't reach (a file dialog, a permission prompt, a save
+// dialog). Only while a website job's browser run is open; the owner already
+// asked for the job, so there's no extra "go"; every step is logged.
+export const desktopTool: ToolDef = {
+  definition: {
+    name: 'desktop',
+    description: 'Control the Mac screen for a Chrome or macOS window the page tools cannot reach (file dialog, permission prompt, save dialog). action: screenshot (look first), click (x,y from that screenshot), type (text), key_press (key, e.g. "return", "esc", "cmd+shift+g"). Use only for that window, then go back to the browser tools.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string', enum: ['screenshot', 'click', 'type', 'key_press'] },
+        x: { type: 'number' }, y: { type: 'number' },
+        text: { type: 'string' }, key: { type: 'string' },
+      },
+      required: ['action'],
+    },
+  },
+  handler: async (input) => {
+    const run = activeWebTaskRun();
+    if (!run || !bookingWindowOpen()) return 'Refused: no website job is running.';
+    if (input.action === 'type' && (looksLikeCardNumber(String(input.text ?? '')) || /password/i.test(String(input.text ?? '')))) {
+      return 'Refused: never type card numbers or passwords.';
+    }
+    const { computerUseTools, approveComputerUseTask } = await import('./computer-use.js');
+    approveComputerUseTask('web-task-desktop');
+    return computerUseTools[0].handler(input, { groupKey: 'web-task-desktop' });
   },
 };

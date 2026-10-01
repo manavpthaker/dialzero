@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { basename, resolve as resolvePath } from 'path';
 import { sendCommand, isBrowserConnected } from '../browser-bridge.js';
 import type { ToolDef, ToolContext } from './index.js';
@@ -21,6 +21,21 @@ function resolveUploadPath(p: string): string | null {
   if (!/\.(png|jpe?g)$/i.test(abs)) return null;
   if (abs.includes('..')) return null;
   return UPLOAD_ROOTS.some((root) => abs === root || abs.startsWith(root + '/')) ? abs : null;
+}
+
+const FILE_ROOTS = ['Downloads', 'Desktop', 'Documents'].map((d) => resolvePath(`${process.env.HOME}/${d}`));
+const SECRET_FILE = /(^|\/)(\.env[^/]*|\.ssh|\.aws|\.gnupg|keychains?|id_rsa[^/]*|[^/]*\.(pem|key|p12|pfx|kdbx))(\/|$)/i;
+/** Why these upload paths aren't allowed, or null when they're fine. */
+export function checkUploadPaths(paths: unknown): string | null {
+  if (!Array.isArray(paths) || !paths.length) return 'paths must be a list of files.';
+  for (const raw of paths) {
+    const abs = resolvePath(String(raw));
+    if (abs.includes('..') || SECRET_FILE.test(abs)) return `${raw} is not allowed.`;
+    const roots = [...FILE_ROOTS, ...UPLOAD_ROOTS];
+    if (!roots.some((r) => abs === r || abs.startsWith(`${r}/`))) return `${raw} is outside Downloads, Desktop and Documents.`;
+    if (!existsSync(abs)) return `${raw} doesn't exist.`;
+  }
+  return null;
 }
 
 function hostnameOf(url: string): string {
@@ -71,6 +86,7 @@ Actions:
 - real_click: A REAL mouse click (index from snapshot, or x,y from screenshot). Use only when click/click_at did nothing: some pages ignore scripted clicks. Chrome shows a "being controlled" bar on the tab while it's used.
 - real_type: Type value with the real keyboard into whatever has focus (real_click the field first). For fields that ignore fill_input.
 - real_key: Press a real key: enter, tab, escape, backspace, space, arrowdown, arrowup.
+- set_files: Attach files to an upload (paths = absolute file paths). Give the file input's selector, or the upload button (index or selector); the file picker is handled for you, it never opens. Only files the owner gave for this job.
 - scroll: Scroll down/up/top/bottom (amount = screens, default 1). Scrolls the page's main list if it has one. Long lists load more as you scroll; snapshot again after.
 - extract_text: Extract text from elements by CSS selector
 - get_page_source: Get raw HTML (truncated to 50k chars)
@@ -92,7 +108,7 @@ Logins: if the owner's password manager fills a login page, click its sign-in bu
             enum: [
               'navigate', 'click', 'extract_text', 'get_page_source',
               'fill_input', 'type_editor', 'submit_form', 'wait_for_selector',
-              'get_current_url', 'list_tabs', 'switch_tab', 'upload_file', 'snapshot', 'scroll', 'screenshot', 'click_at', 'real_click', 'real_type', 'real_key',
+              'get_current_url', 'list_tabs', 'switch_tab', 'upload_file', 'snapshot', 'scroll', 'screenshot', 'click_at', 'real_click', 'real_type', 'real_key', 'set_files',
             ],
             description: 'The browser action to perform',
           },
@@ -103,6 +119,7 @@ Logins: if the owner's password manager fills a login page, click its sign-in bu
           x: { type: 'number', description: 'For click_at: x in the last screenshot' },
           y: { type: 'number', description: 'For click_at: y in the last screenshot' },
           key: { type: 'string', description: 'For real_key: enter, tab, escape, backspace, space, arrowdown, arrowup' },
+          paths: { type: 'array', items: { type: 'string' }, description: 'For set_files: absolute paths of the files to attach' },
           direction: { type: 'string', enum: ['down', 'up', 'top', 'bottom'], description: 'For scroll' },
           amount: { type: 'number', description: 'Screens to scroll (for scroll, default 1)' },
           value: { type: 'string', description: 'Value to fill (for fill_input) or type (for type_editor)' },
@@ -147,6 +164,12 @@ Logins: if the owner's password manager fills a login page, click its sign-in bu
         if (!params.filename) params.filename = basename(safe);
         if (!params.mimeType) params.mimeType = safe.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
         delete params.path;
+      }
+
+      // set_files: real files only, from the owner's usual folders, never secrets.
+      if (action === 'set_files') {
+        const bad = checkUploadPaths(params.paths);
+        if (bad) return `set_files refused: ${bad}`;
       }
 
       // Auto-inject the group's tab if no explicit tabId was provided

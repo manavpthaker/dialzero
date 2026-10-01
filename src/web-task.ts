@@ -32,10 +32,15 @@ export interface WebTaskPayload {
   site: string;            // URL or the service name
   share?: string;          // details the task may enter, with values
   notes?: string;
+  files?: string[];        // absolute paths they gave for upload (checked by checkUploadPaths)
   owner_request?: string;  // their words, when they asked for it themselves
 }
 
 type Prepared = { payload: Record<string, unknown>; summary: string } | { error: string };
+
+// Late-bound so web-task.ts doesn't import the browser tool module at load.
+let uploadCheck: (files: string[]) => string | null = () => null;
+void import('./tools/browser.js').then((m) => { uploadCheck = m.checkUploadPaths; }).catch(() => {});
 
 // Each browser run is time-boxed; a long job (exporting dozens of recordings)
 // takes several runs. The job keeps going, run after run, until it's done, it
@@ -62,6 +67,12 @@ export function prepareWebTask(p: Record<string, unknown>): Prepared {
     return { error: 'web tasks never use card, bank, ID, or password details. Logins come from their signed-in Chrome.' };
   }
   const payload: WebTaskPayload = { task, site };
+  if (Array.isArray(p.files) && p.files.length) {
+    const files = p.files.map(String);
+    const bad = uploadCheck(files);
+    if (bad) return { error: `files: ${bad}` };
+    payload.files = files;
+  }
   if (share) payload.share = share;
   if (notes) payload.notes = notes;
   if (s('owner_request')) payload.owner_request = s('owner_request');
@@ -136,7 +147,7 @@ export function webTaskPrompt(p: WebTaskPayload, progress: string[] = [], extra 
   return `You are doing a task on a website for the owner, in their own Chrome. They're signed in to most sites, and a password manager may fill saved logins. Today is ${todayET()} (${tzAbbrev()}).
 
 TASK: ${p.task}${prefsFor(p.task, p.site)}
-SITE: ${p.site}${p.share ? `\nDETAILS YOU MAY ENTER (and nothing else): ${p.share}` : ''}${p.notes ? `\nNOTES: ${p.notes}` : ''}${sofar}${extra ? `\n\n${extra}` : ''}
+SITE: ${p.site}${p.files?.length ? `\nFILES YOU MAY UPLOAD (set_files, these paths only): ${p.files.join(', ')}` : ''}${p.share ? `\nDETAILS YOU MAY ENTER (and nothing else): ${p.share}` : ''}${p.notes ? `\nNOTES: ${p.notes}` : ''}${sofar}${extra ? `\n\n${extra}` : ''}
 
 You are ${getBotName()}, their assistant: get it done. The site won't make it obvious; figure it out.
 
@@ -150,6 +161,7 @@ When something doesn't work, try another way before giving up. In order:
 - Use snapshot to see what's actually clickable, then click by index. Rows in a list, "..." menus, and icons often only show in snapshot (it includes embedded frames and popups).
 - If the page still doesn't make sense (a step you can't read, a popup with no text), take a screenshot and look, then click_at the right spot. Never ask the owner what's on the screen: look.
 - If a click or typing does nothing (some pages ignore scripted input), use real_click / real_type / real_key: real mouse and keyboard input.
+- Uploads: use set_files (the file picker never opens). If a Chrome or macOS window appears that the page tools can't reach (a file dialog that opened anyway, a permission prompt, a save dialog, "Open this app?"), use desktop: screenshot, then click/type/key_press in that window only, then go back to the browser tools.
 - Scroll: long lists load more as you scroll. Look for a select-all checkbox, a bulk "Export" or "Download" in a toolbar, a "..." menu on each item, and account/settings pages (often "Data", "Privacy", "Export", "Download my data").
 - Look it up: web_search "how to <task> on <site>" and follow the help-center steps.
 - Check your work: check_downloads shows what landed in Downloads.
@@ -266,6 +278,7 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
             out = await runBrowserSubAgent(`web-task #${actionId}`, webTaskPrompt(p, st.progress, extra), timeoutMs);
           } finally {
             activeRun = null;
+            clearDesktop();
           }
           if (job?.waiting_for) patchJob(jobId, { waiting_for: null, ask: null, answer: null });
           result = out === null
@@ -381,6 +394,8 @@ export function resumeWebTasks(now = Date.now()): number {
 // ── Tracker hooks, the running job, and the page's host ────────────────────
 
 let activeRun: { actionId: number; jobId: number; codeHost: string | null } | null = null;
+let clearDesktop: () => void = () => {};
+void import('./tools/computer-use.js').then((m) => { clearDesktop = () => m.clearComputerUseTask('web-task-desktop'); }).catch(() => {});
 /** The job whose browser run is open right now (read by enter_owner_code). */
 export function activeWebTaskRun(): { actionId: number; jobId: number; codeHost: string | null } | null { return activeRun; }
 
