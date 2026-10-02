@@ -20,10 +20,11 @@ It's not an app you open. It's a contact in your phone.
 | "Remind me to call the plumber Thursday" | Adds a to-do (synced to your phone's Google Tasks) and brings it up at the right time. |
 | "Tell Sam I'm running 10 late" | Texts Sam for you, as you. |
 | "Email the landlord about the leak" | Writes and sends the email from your Gmail. |
-| "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. |
-| "Cancel my gym membership" | Does it on their website in your signed-in Chrome, turning down every offer to stay, or calls them if it has to. It keeps at it until it's done and texts you the result. It never pays, and if they want a login, a PIN or card digits, it asks you. |
+| "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. If the menu only leads to voicemail, it leaves the message. If it can't get through, it tells you exactly where it got stuck. |
+| "Cancel my gym membership" | Does it on their website in your signed-in Chrome, turning down every offer to stay, or calls them if it has to. It keeps at it until it's done and texts you the result. It signs in with logins you've saved for it in 1Password (optional; it never sees the password) and picks up texted or emailed codes on its own. It never pays, and if they want something only you have, it asks you once, not every five minutes. |
 | "Book a table for 4 Saturday at 7" | Books it online (never enters a card), or calls if it can't. |
 | "Download all my recordings from that app, then cancel it" | Works through the site one step at a time, checks the files landed in Downloads, and only cancels once the export is done. |
+| (nothing, you're busy) | Texts you when it's time to leave for something on your calendar, or when two things overlap. |
 | "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
 | "Hey Siri, ask Milo what's next" (whatever you named it) | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
 | "What are you working on?" | One short list: what's waiting on you, what it's doing, and what it's keeping an eye on. Say "stop" about any of it. |
@@ -41,6 +42,7 @@ Every feature is optional. You pick what you want during setup.
 - **An API key from Anthropic (Claude) or OpenAI**, your choice. This is pay-as-you-go and separate from any Claude or ChatGPT subscription, because the assistant runs around the clock. For most people it's a few dollars to a few tens of dollars a month, and you can set a hard monthly limit in the billing settings. (Phone calls always use OpenAI's voice model, so they need an OpenAI key even if Claude runs everything else.)
 - **A Google account**, if you want calendar, to-dos and email.
 - Optional: a phone number from Twilio (a small monthly fee plus per-minute charges) if you want it to make and take calls.
+- Optional: a 1Password account, if you want it to sign in to websites for you. You give it one vault with only the logins you choose.
 
 ## Setup: let Claude Code or Codex walk you through it
 
