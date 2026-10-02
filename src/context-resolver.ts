@@ -5,13 +5,13 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import type { GroupConfig } from './group-resolver.js';
 import type { User } from './user-resolver.js';
-import { getOpenTasks, getOverdueTasksAll, getMemory, getRecentMemory, searchFacts, factsAbout, factsByPersonId, getFactsByType, peopleSearch, getRecentInteractions, searchIMessages, type Fact, type Person, type Interaction, type IMessageLogRow, getLatestLocation } from './db.js';
+import { getRecentMessagesWithMetadata, getOpenTasks, getOverdueTasksAll, getMemory, getRecentMemory, searchFacts, factsAbout, factsByPersonId, getFactsByType, peopleSearch, getRecentInteractions, searchIMessages, type Fact, type Person, type Interaction, type IMessageLogRow, getLatestLocation } from './db.js';
 import { toolRegistry } from './tools/index.js';
 import { getProfileConfig, getTimezone } from './config.js';
 import { localOffset, tzAbbrev } from './lib/time.js';
 import { planRetrieval } from './retrieval-planner.js';
 import { FAMILY_TURN_MANIFEST_TOOL } from './family-turn-manifest.js';
-import { getRecentCheckin } from './checkins.js';
+import { getRecentCheckinMeta, getRecentCheckin } from './checkins.js';
 import { getRecentDetails } from './cos-outbound.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -678,8 +678,17 @@ export function loadSystemBlocks(
 
   // Check-in replies. Check-ins number their items 1..5 (not task ids) and offer
   // "more"; a terse reply only makes sense against the message it answers.
+  // Only when the message is plausibly an answer to it: check-in wording
+  // ("done 2", "more", a bare number), or the check-in is the last thing the
+  // bot said and is under 3 hours old. Attaching a morning check-in to every
+  // short message all evening made "Skip" (about something else) ambiguous.
   if (!isSharedAudience && user.tone === 'direct' && userMessage && userMessage.trim().length <= 60) {
-    const checkin = getRecentCheckin();
+    const meta = getRecentCheckinMeta(12);
+    const checkinWording = /^\s*(\d{1,2}\b|(done|snooze|skip|drop|cancel|keep|more|details?|expand|full)\b[^a-z]*\d|(more|details?|expand|full)\s*[.!?]?\s*$)/i.test(userMessage);
+    const lastBot = getRecentMessagesWithMetadata(group.key, 6).filter((m) => m.role === 'assistant').at(-1);
+    const lastBotAt = lastBot ? Date.parse(`${lastBot.created_at.replace(' ', 'T')}Z`) : 0;
+    const checkinIsLatest = !!meta && meta.at > lastBotAt && Date.now() - meta.at < 3 * 3600_000;
+    const checkin = meta && (checkinWording || checkinIsLatest) ? meta.text : null;
     const wantsMore = /^\s*(more|details?|expand|full)\b/i.test(userMessage);
     const details = wantsMore ? getRecentDetails() : null;
     if (checkin || details) {

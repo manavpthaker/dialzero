@@ -18,7 +18,7 @@ import { actionTools } from './actions.js';
 import { errandTools } from './errands.js';
 import { sendNowTools } from './send-now.js';
 import { webBookingTools, bookingBrowserTools } from './web-booking.js';
-import { webTaskTools, checkDownloadsTool, enterOwnerCodeTool, openSignInLinkTool, desktopTool } from './web-task.js';
+import { webTaskTools, checkDownloadsTool, enterOwnerCodeTool, openSignInLinkTool, desktopTool, fillLoginTool, fill2faTool } from './web-task.js';
 import { jobTools } from './jobs.js';
 import { followupTools } from './followups.js';
 import { wakeUpTools } from './wakeup.js';
@@ -108,7 +108,7 @@ export const toolRegistry: Record<string, ToolDef[]> = {
     ...emailTools.filter((t) => ['email_list', 'email_search', 'email_read_thread'].includes(t.definition.name)),
     ...webTools.filter((t) => t.definition.name === 'web_search'),
   ],
-  'booking-browser': [...bookingBrowserTools, checkDownloadsTool, enterOwnerCodeTool, openSignInLinkTool, desktopTool, ...webTools.filter((t) => t.definition.name === 'web_search')],
+  'booking-browser': [...bookingBrowserTools, checkDownloadsTool, enterOwnerCodeTool, openSignInLinkTool, desktopTool, fillLoginTool, fill2faTool, ...webTools.filter((t) => t.definition.name === 'web_search')],
   'computer-use': computerUseTools,
   notion: notionTools,
   'family-calendar': familyCalendarTools,

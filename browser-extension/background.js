@@ -532,7 +532,7 @@ async function doRealClick({ index, x, y, guard, tabId }) {
   return { clicked: true, real: true, at: base, elementText: label.slice(0, 100), currentUrl: t.url, currentTitle: t.title };
 }
 
-async function doRealType({ value, fieldGuard, tabId }) {
+async function doRealType({ value, fieldGuard, requireType, tabId }) {
   const tab = await getTab(tabId);
   if (value == null || value === '') return { error: 'value is required' };
   // What has focus (looking into same-tab frames), checked against the caller's rule.
@@ -543,10 +543,19 @@ async function doRealType({ value, fieldGuard, tabId }) {
       let el = document.activeElement;
       while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
       if (!el || el === document.body || el.tagName === 'IFRAME') return null;
-      return `${el.name || ''} ${el.id || ''} ${el.getAttribute('autocomplete') || ''} ${el.placeholder || ''} ${el.getAttribute('aria-label') || ''} ${el.type || ''}`;
+      return { desc: `${el.name || ''} ${el.id || ''} ${el.getAttribute('autocomplete') || ''} ${el.placeholder || ''} ${el.getAttribute('aria-label') || ''} ${el.type || ''}`, type: (el.type || '').toLowerCase(), tag: el.tagName };
     },
   });
-  const field = results.map((r) => r.result).find(Boolean) || '';
+  const focused = results.map((r) => r.result).find(Boolean) || null;
+  const field = focused ? focused.desc : '';
+  // Secrets only go into the kind of box the caller expects (a password into
+  // type=password), so a wrong click can't type one into a visible text field.
+  if (requireType) {
+    const ok = String(requireType).split('|');
+    if (!focused || focused.tag !== 'INPUT' || !ok.includes(focused.type)) {
+      return { error: `Refused: the focused field is ${focused ? `${focused.tag.toLowerCase()} type=${focused.type || 'none'}` : 'nothing'}, not ${ok.join(' or ')}. Click the right field first.` };
+    }
+  }
   if (fieldGuard && new RegExp(fieldGuard, 'i').test(field)) {
     return { error: 'Refused: the focused field is a card/payment field. STOP and return status "blocked" saying the site wants a card.' };
   }

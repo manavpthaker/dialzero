@@ -334,9 +334,30 @@ export async function runIMessageHistoryBatch(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // A batch the local model can't answer cleanly (e.g. its JSON is cut off
+    // mid-array) fails the same way every time: batch #218 was retried 1,410
+    // times, three minutes of CPU each. After three tries, move past it.
+    if (batch.attempt_count >= SKIP_AFTER_ATTEMPTS) {
+      commitIMessageHistoryBatch({
+        batchId: batch.id,
+        dispositions: rows.map((row) => ({ imessageId: row.id, disposition: 'no_signal' as IMessageHistoryDisposition })),
+        facts: [],
+        safeCount: 0,
+        privateCount: 0,
+        botCount: 0,
+        observationCount: 0,
+      });
+      opts.log(`history: batch #${batch.id} skipped after ${batch.attempt_count} failed attempts — ${message}`);
+      return {
+        batchId: batch.id, scanned: rows.length, safe: 0, private: 0, botGenerated: 0,
+        observationsAccepted: 0, factsInserted: 0, remaining: rows.length === batchSize,
+      };
+    }
     failIMessageHistoryBatch(batch.id, message);
     opts.log(`history: batch #${batch.id} failed — ${message}`);
     throw err;
   }
 }
+
+const SKIP_AFTER_ATTEMPTS = 3;
 

@@ -33,6 +33,7 @@ export interface WebTaskPayload {
   share?: string;          // details the task may enter, with values
   notes?: string;
   files?: string[];        // absolute paths they gave for upload (checked by checkUploadPaths)
+  practice?: boolean;      // a test run: no texts, never waits on the owner, no follow-up watches
   owner_request?: string;  // their words, when they asked for it themselves
 }
 
@@ -179,8 +180,12 @@ Status rules:
 
 Hard rules:
 - Billing often moves to another site or a pop-up (Stripe, Shopify, Paddle, Chargebee): follow it. When a click opens a new window you're told, and your tools switch to it.
-- Email sign-ins (a page that asks only for an email, then sends a code or a sign-in link, like Stripe's or Shopify's): enter THEIR EMAIL FOR THIS SITE (or one from DETAILS or an answer), click send, then return needs_owner with need "code" or "link". Both are fetched from their email automatically. If you don't know which email, return needs_owner info asking "Which email do you use for <site>?".
-- Logins: if a login page is filled in, click sign in. If it stays empty or asks for a password, return needs_owner login. A code: return needs_owner code, then type it ONLY with enter_owner_code once you have it. Never type or guess a password or code yourself. A CAPTCHA: needs_owner login.
+- On any login page, try fill_login FIRST (their saved 1Password login). Never type an email or username yourself while fill_login might have one.
+- If a site offers to email/text a code or link instead of a password, choose the password option ("Use password instead", "Sign in with password") when fill_login has a login for the site.
+- Never click "forgot password", "forgot username/number", "reset", or "recover" links: they email or text the owner and change nothing for you. If fill_login can't sign in, return needs_owner login.
+- Email sign-ins with no saved login (a page that asks only for an email, then sends a code or a sign-in link, like Stripe's or Shopify's): enter THEIR EMAIL FOR THIS SITE (or one from DETAILS or an answer), click send, then return needs_owner with need "code" or "link". Both are fetched from their email automatically. If you don't know which email, return needs_owner info asking "Which email do you use for <site>?".
+- Logins: if a login page is filled in, click sign in. If it's empty, take a snapshot and call fill_login (their saved login for this site, from 1Password), then click sign in. A page asking only for the email is a login page: fill_login with username_index, continue, then fill_login with password_index. Never stop at an email or password field without trying fill_login first. Only if fill_login says there's no login for this site, return needs_owner login (say they can add it to the assistant's 1Password vault).
+- An authenticator-app code (not texted or emailed): fill_2fa_code with the code field's index. A code: return needs_owner code, then type it ONLY with enter_owner_code once you have it. Never type or guess a password or code yourself. A CAPTCHA: needs_owner login.
 - NEVER pay, enter a card, or click a pay/upgrade button.
 - When cancelling: decline every offer to stay (discounts, free months, pausing, downgrading) unless NOTES says to take it. An offer to stay is never a reason to stop or ask, whatever TASK says. Keep going to the final cancel confirmation. If the only way to cancel is a phone call or chat with a person, STOP with status "blocked" and say so.
 - Never delete the account or its data unless TASK says to, in those words. Never change a password or email.
@@ -191,7 +196,7 @@ Your LAST message must be ONLY this JSON (no other text):
 Use "done" only when the page showed the task finished (e.g. "Your subscription has been cancelled").`;
 }
 
-interface RunState { runs: number; progress: string[]; nextAt: number; email?: string | null }
+interface RunState { runs: number; progress: string[]; nextAt: number; email?: string | null; lastAskAt?: number }
 
 function loadState(id: number): RunState {
   try {
@@ -208,6 +213,14 @@ const running = new Set<number>();
 const OWNER_NEEDED = /\b(log ?in|sign ?in|password|passcode|verification code|one-time code|2fa|two-factor|captcha|card|payment|pay\b|deposit|billing info|phone|call (them|us|support)|by phone|live chat|chat with|speak (to|with)|agent|representative|their (decision|choice|approval)|decide|which one|verify (your|their) identity|identity)\b/i;
 export function needsOwner(summary: string): boolean { return OWNER_NEEDED.test(summary); }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// One question per job per 15 minutes: a newer one still updates the job (the owner
+// sees it in whats_going_on and the check-in), it just isn't texted again.
+// One job once sent 5 texts in 20 minutes.
+const ASK_GAP_MS = 15 * 60_000;
+function askAllowed(st: RunState): boolean {
+  return !st.lastAskAt || Date.now() - st.lastAskAt >= ASK_GAP_MS;
+}
 
 const wordsOf = (t: string) => new Set(t.toLowerCase().replace(/^run \d+ \([^)]*\): /, '').split(/[^a-z]+/).filter((w) => w.length >= 4));
 /** The last three runs failed for what reads like the same reason. */
@@ -262,8 +275,15 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
             st.email = await emailLookup(brandsFor(p.site, null)).catch(() => null);
             saveState(actionId, st);
           }
+          // Already sitting on a sign-in page 1Password has a login for?
+          // Say so up front: runs that saw "Sign in" kept quitting even
+          // after being sent back with "use fill_login".
+          const startUrl = await pageUrlReader().catch(() => null);
+          const onLogin = !!startUrl && /\/(ap\/)?(sign-?in|log-?in|login|auth|account\/login|session)/i.test(startUrl);
+          const savedHere = onLogin ? await loginLookup(new URL(startUrl!).hostname).catch(() => null) : null;
           const extra = [
-            st.email ? `THEIR EMAIL FOR THIS SITE (the address it emails them at): ${st.email}` : '',
+            savedHere ? `YOU ARE ON A SIGN-IN PAGE AND 1PASSWORD HAS THEIR ${savedHere} LOGIN FOR IT. First step: snapshot, then fill_login (username_index on an email page, then password_index on the next page), then continue the task. Signing in this way is expected and allowed, even for read-only tasks.` : '',
+            st.email ? `THEIR EMAIL FOR THIS SITE, only if fill_login says there's no saved login (the address it emails them at): ${st.email}` : '',
             answered
               ? `THE OWNER ANSWERED your question "${answered.ask}": ${answered.answer}\nContinue from where you are.`
               : job?.waiting_for === 'code' && job.answer
@@ -272,14 +292,14 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
                   ? `THE SIGN-IN LINK ARRIVED. Call open_sign_in_link (no arguments); it opens in your tab. Then continue.`
                   : '',
           ].filter(Boolean).join('\n');
-          activeRun = { actionId, jobId, codeHost: job?.code_host ?? null };
-          let out: string | null;
-          try {
-            out = await runBrowserSubAgent(`web-task #${actionId}`, webTaskPrompt(p, st.progress, extra), timeoutMs);
-          } finally {
-            activeRun = null;
-            clearDesktop();
-          }
+          // Marked active only while this run holds the browser (several jobs
+          // can queue for it; marking before the lock let one job's ending
+          // clear another's sign-in tools mid-run).
+          const mine = { actionId, jobId, codeHost: job?.code_host ?? null };
+          const out = await runBrowserSubAgent(`web-task #${actionId}`, webTaskPrompt(p, st.progress, extra), timeoutMs, {
+            onStart: () => { activeRun = mine; fillLoginTried = false; },
+            onEnd: () => { if (activeRun === mine) activeRun = null; clearDesktop(); },
+          });
           if (job?.waiting_for) patchJob(jobId, { waiting_for: null, ask: null, answer: null });
           result = out === null
             ? { status: 'in_progress', summary: `A run hit the ${Math.round(timeoutMs / 60_000)}-min limit; check the page for what's done.` }
@@ -304,6 +324,15 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
       } else if (result.status === 'blocked' && !needsOwner(result.summary)) {
         result = { ...result, status: 'failed', summary: `${result.summary} (Not actually blocked on the owner: try a different way.)` };
       }
+      // "Log in for me" while 1Password has this site's login and the run
+      // never tried it (seen on a large retailer's site): not the owner's problem yet. Send it back.
+      if (result.status === 'needs_owner' && result.need === 'login' && !fillLoginTried) {
+        const pageHost = await hostReader().catch(() => null);
+        const saved = pageHost ? await loginLookup(pageHost) : null;
+        if (saved) {
+          result = { ...result, status: 'failed', summary: `Stopped at a login without trying fill_login, but 1Password has a ${saved} login for this site. Go to the sign-in page, snapshot, and call fill_login.` };
+        }
+      }
       if (result.status === 'needs_owner') {
         const need = result.need ?? 'info';
         const host = need === 'code' ? await hostReader().catch(() => null) : null;
@@ -324,11 +353,16 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
             continue;
           }
         }
+        if (p.practice) {
+          // A practice run never waits on the owner: record what it needed and stop.
+          result = { ...result, status: 'blocked', summary: `Practice run needed the owner (${need}): ${result.ask ?? result.summary}` };
+          break;
+        }
         waitOnOwner(jobId, need, result.ask ?? result.summary, host);
         st.progress = [...st.progress, `Run ${st.runs} (paused for the owner): ${result.summary}`].slice(-10);
         st.runs = Math.max(0, st.runs - 1); // waiting on them doesn't use up a try
         saveState(actionId, st);
-        try { await d.notify(result.ask ?? result.summary, `web-task:${actionId}:ask`); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
+        if (askAllowed(st)) try { await d.notify(result.ask ?? result.summary, `web-task:${actionId}:ask`); st.lastAskAt = Date.now(); saveState(actionId, st); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
         return result;
       }
       if (result.status === 'done' || result.status === 'blocked') break;
@@ -336,11 +370,15 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
       st.progress = [...st.progress, `Run ${st.runs} (${result.status === 'in_progress' ? 'progress' : "didn't work"}): ${result.summary}`].slice(-10);
       // The same wall three runs in a row: more runs won't change it. Stop
       // and ask them, with the routes left (email them, do it themselves, skip it).
+      if (result.status === 'failed' && sameWall(st.progress) && p.practice) {
+        result = { ...result, status: 'blocked', summary: `Practice run hit the same wall 3 times: ${result.summary}` };
+        break;
+      }
       if (result.status === 'failed' && sameWall(st.progress)) {
         const ask = `${p.site.replace(/^https?:\/\//, '').replace(/\/.*$/, '')} keeps hitting the same wall: ${result.summary.replace(/\s*\(Not actually blocked[^)]*\)/, '')} Want me to email their support instead, or skip this part?`;
         waitOnOwner(jobId, 'decision', ask);
         saveState(actionId, st);
-        try { await d.notify(ask, `web-task:${actionId}:ask`); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
+        if (askAllowed(st)) try { await d.notify(ask, `web-task:${actionId}:ask`); st.lastAskAt = Date.now(); saveState(actionId, st); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
         return { ...result, status: 'needs_owner', need: 'decision', ask };
       }
       // Real progress continues right away; a failure waits a few minutes first.
@@ -358,7 +396,7 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
     text = `✅ ${result.summary}${conf}`;
     markActionDone(actionId, { outcome: `${result.summary}${conf}`, outcome_url: result.url ?? null, actual_cost_cents: 0 });
     finishJob(jobId, 'done', `${result.summary}${conf}`);
-    for (const hook of afterDone) { try { hook(jobId, p, result); } catch (err) { console.error('[web-task] after-done hook failed:', err); } }
+    if (!p.practice) for (const hook of afterDone) { try { hook(jobId, p, result); } catch (err) { console.error('[web-task] after-done hook failed:', err); } }
   } else if (result.status === 'blocked') {
     text = `Stuck on ${p.site}: ${result.summary}`;
     markActionFailed(actionId, `blocked: ${result.summary}`);
@@ -370,6 +408,7 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
     finishJob(jobId, 'failed', last);
   }
   deleteMemory(STATE_GROUP, `task_${actionId}`);
+  if (p.practice) { console.log(`[web-task] practice #${actionId}: ${text}`); return result; }
   try {
     await d.notify(text, `web-task:${actionId}`);
   } catch (err) {
@@ -394,6 +433,9 @@ export function resumeWebTasks(now = Date.now()): number {
 // ── Tracker hooks, the running job, and the page's host ────────────────────
 
 let activeRun: { actionId: number; jobId: number; codeHost: string | null } | null = null;
+let fillLoginTried = false;
+/** fill_login calls this, so a run that gives up at a login without trying it can be sent back. */
+export function noteFillLoginTried(): void { fillLoginTried = true; }
 let clearDesktop: () => void = () => {};
 void import('./tools/computer-use.js').then((m) => { clearDesktop = () => m.clearComputerUseTask('web-task-desktop'); }).catch(() => {});
 /** The job whose browser run is open right now (read by enter_owner_code). */
@@ -419,6 +461,15 @@ let codeLookup: (brands: string[], sinceMs: number) => Promise<SignIn | null> = 
   if (hit?.link) return { link: hit.link.link, source: 'email' };
   return null;
 };
+let loginLookup: (host: string) => Promise<string | null> = async (host) => {
+  const op = await import('./lib/onepassword.js');
+  if (!op.onePasswordReady()) return null;
+  const m = await op.findLoginFor(host);
+  return 'error' in m ? null : m.title;
+};
+/** Tests swap in a fake 1Password lookup. */
+export function setWebTaskLoginLookup(fn: typeof loginLookup | null): void { if (fn) loginLookup = fn; }
+
 let emailLookup: (brands: string[]) => Promise<string | null> = async (brands) => (await import('./lib/code-finder.js')).findAccountEmail(brands);
 /** Tests swap in a fake account-email lookup. */
 export function setWebTaskEmailLookup(fn: typeof emailLookup | null): void {
@@ -428,6 +479,14 @@ export function setWebTaskEmailLookup(fn: typeof emailLookup | null): void {
 export function setWebTaskCodeLookup(fn: typeof codeLookup | null): void {
   if (fn) codeLookup = fn;
 }
+
+let pageUrlReader: () => Promise<string | null> = async () => {
+  const { browserTools } = await import('./tools/browser.js');
+  const out = String(await browserTools[0].handler({ action: 'get_current_url' }, { groupKey: 'booking' }));
+  try { return (JSON.parse(out) as { url?: string }).url ?? null; } catch { return null; }
+};
+/** Tests swap in a fake current page. */
+export function setWebTaskPageUrlReader(fn: (() => Promise<string | null>) | null): void { if (fn) pageUrlReader = fn; }
 
 let hostReader: () => Promise<string | null> = async () => {
   const { browserTools } = await import('./tools/browser.js');

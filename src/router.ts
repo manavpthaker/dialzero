@@ -9,7 +9,7 @@
 // the LLM acks drifted out of context; index.ts now fires a fixed receipt ack.)
 
 import { parseStrEnv, parseNumEnv } from './lib/env.js';
-import { OPENAI_ROUTER_MODEL, openAIText, llmConfigured, llmProvider } from './lib/openai.js';
+import { OPENAI_ROUTER_MODEL, openAIText, llmConfigured } from './lib/openai.js';
 import { withLlmContext } from './lib/llm-context.js';
 
 export type Mode = 'sync' | 'async';
@@ -57,7 +57,7 @@ function cacheSet(key: string, mode: Mode): void {
 }
 
 const ROUTER_MODEL = parseStrEnv('OPENAI_ROUTER_MODEL', OPENAI_ROUTER_MODEL);
-const HAIKU_TIMEOUT_MS = parseNumEnv('ASSISTANT_ROUTER_TIMEOUT_MS', llmProvider() === 'claude' ? 3000 : 1500);
+const HAIKU_TIMEOUT_MS = parseNumEnv('ASSISTANT_ROUTER_TIMEOUT_MS', 4000);
 
 const ROUTE_SYSTEM =
   'Classify one incoming iMessage to a personal AI agent. Reply with EXACTLY one ' +

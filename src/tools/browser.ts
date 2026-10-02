@@ -25,6 +25,16 @@ function resolveUploadPath(p: string): string | null {
 
 const FILE_ROOTS = ['Downloads', 'Desktop', 'Documents'].map((d) => resolvePath(`${process.env.HOME}/${d}`));
 const SECRET_FILE = /(^|\/)(\.env[^/]*|\.ssh|\.aws|\.gnupg|keychains?|id_rsa[^/]*|[^/]*\.(pem|key|p12|pfx|kdbx))(\/|$)/i;
+/**
+ * Run one bridge command in a group's tab without logging its params or
+ * result (for secrets: 1Password fills). Returns the raw result.
+ */
+export async function quietCommandInGroupTab(groupKey: string, action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const tabId = sessionTabs.get(groupKey);
+  if (!tabId) throw new Error('no open tab for this job');
+  return (await sendCommand(action, { ...params, tabId }, 15000, true)) as Record<string, unknown>;
+}
+
 /** Why these upload paths aren't allowed, or null when they're fine. */
 export function checkUploadPaths(paths: unknown): string | null {
   if (!Array.isArray(paths) || !paths.length) return 'paths must be a list of files.';

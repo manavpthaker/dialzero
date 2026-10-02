@@ -140,7 +140,8 @@ function errandItem(r: ErrandRow): OpenItem {
 
 export function openItems(): OpenItem[] {
   const items = [
-    ...listOpenJobRows(30).map(jobItem),
+    // Practice runs are tests: never in the owner's list, check-ins, or reply context.
+    ...listOpenJobRows(30).filter((j) => !j.title.startsWith('Practice:')).map(jobItem),
     ...listErrands({ open: true, limit: 10 }).map(errandItem),
   ];
   const order: Record<ItemStatus, number> = { waiting_on_you: 0, working: 1, watching: 2 };
@@ -239,7 +240,11 @@ export async function stopItem(whichText: string): Promise<string> {
 
 /** Short block for the prompt, so a bare reply ("482913", "done") maps to the right job. */
 export function waitingBlock(): string {
-  const waiting = openItems().filter((i) => i.status === 'waiting_on_you');
+  // Only what's been waiting on the owner in the last day: an old ask in every
+  // message's context turns unrelated short replies into "answers" to it.
+  // Older ones stay in whats_going_on and the check-ins.
+  const dayAgo = Date.now() - 24 * 3_600_000;
+  const waiting = openItems().filter((i) => i.status === 'waiting_on_you' && Date.parse(i.since.includes('T') ? i.since : `${i.since.replace(' ', 'T')}Z`) >= dayAgo);
   if (!waiting.length) return '';
   return `## Waiting on the owner\n${waiting.map((i) => `- ${i.line}`).join('\n')}\nIf their message answers one of these (a code, "done", "logged in", a choice), call answer_job with their words. Don't ask them which unless it's truly unclear.`;
 }

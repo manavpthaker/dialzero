@@ -109,6 +109,19 @@ Use start_errand instead when it will take calling around or several tries over 
       const dial = toDialable(String(i.phone ?? ''));
       if (!dial) return `Not calling: "${i.phone}" is not a US number the bot can call.`;
       if (isFictionalNumber(dial)) return `Not calling: ${i.phone} is a made-up 555-01xx number. Look up the real number or ask the owner for it.`;
+      // Already calling them? A second request ("call them again", "leave a
+      // voicemail") goes to that errand instead of dialing the same number twice.
+      const same = listErrands({ open: true, limit: 20 }).find((r) => {
+        try { return (JSON.parse(r.envelope_json) as { targets: Array<{ phone: string }> }).targets.some((t) => t.phone.slice(-10) === dial.slice(-10)); } catch { return false; }
+      });
+      if (same) {
+        const note = String(i.owner_request).trim();
+        if (same.status === 'waiting') extendErrand(same.id, 2, true);
+        addErrandNote(same.id, note);
+        return same.status === 'waiting'
+          ? `Already had a call going to ${i.name}; added the owner's words ("${note}") and it's calling again now. Tell the owner in one line.`
+          : `Already calling ${i.name}; added the owner's words ("${note}") to that call. Tell the owner in one line; don't start another.`;
+      }
       const prepared = prepareErrand({
         goal: i.goal, targets: [{ name: i.name, phone: dial }], share: i.share ?? '', max_calls: 2,
         keep_transcript: i.keep_transcript === true,

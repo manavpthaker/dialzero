@@ -458,7 +458,9 @@ function errandSessionConfig(call: ErrandCall) {
       `Your goal: ${call.goal}`,
       call.context ? `Details you may share: ${call.context}` : '',
       call.callback ? returning : call.menuLog?.length
-        ? `This call is already in progress. You are working through their automated phone menu; so far: ${call.menuLog.join('; ')}. Listen to what comes next. Only introduce yourself once a person answers or a voicemail beep sounds.`
+        ? /message|voice ?mail|leave|record/i.test(call.menuLog.at(-1) ?? '')
+          ? `This call is already in progress. You chose the option to leave a message (${call.menuLog.join('; ')}). After the beep, or as soon as it goes quiet, leave your one short message now, then call end_call with status "voicemail".`
+          : `This call is already in progress. You are working through their automated phone menu; so far: ${call.menuLog.join('; ')}. Listen to what comes next. Only introduce yourself once a person answers or a voicemail beep sounds. If no one comes on after a while, say your message anyway: it may be recording.`
         : `Right after they greet you, say: "Hi, this is ${bot}, ${full}'s assistant." Then say why you are calling.`,
       call.callback ? '' : `If an automated phone menu answers ("press 1 for..."), do not talk over it. Listen to the options, then call press_keys with the key for the option that best fits your goal (or the operator / "all other questions" option). If it asks you to say something instead, say it. Hold music: wait quietly. At most ${MAX_KEY_PRESSES} key presses per call.`,
       `Tone: warm and brief, like a good front-desk person. Friendly, gets to the point, thanks people. Short spoken sentences, no filler, no over-apologizing. Use ${owner}'s full name (${full}) for bookings and spell the last name if asked.`,
@@ -571,14 +573,22 @@ function runCall(callId: string, call: PendingCall): void {
   // On 2026-09-29 that left a call silent for 5 minutes. So: speak first after
   // a short wait, and give up on a line where nothing happens.
   let botSpoke = false;
-  // Not after a menu key press: what follows is often hold music or another menu.
-  const speakFirst = call.kind === 'errand' && !onMenu && !inbound
-    ? setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, 10_000)
+  // After a menu key press what follows is often hold music or another menu,
+  // so wait longer. But after choosing "leave a message", the line goes quiet
+  // after the beep: a beep isn't speech, so nothing ever prompts us. On
+  // 2026-10-01 three calls pressed "deliver message" and then sat in
+  // silence until the line dropped. There, start the message after a few
+  // seconds.
+  const lastPress = call.kind === 'errand' ? call.menuLog?.at(-1) ?? '' : '';
+  const toMessage = onMenu && /message|voice ?mail|leave|record/i.test(lastPress);
+  const speakAfterMs = !onMenu ? 10_000 : toMessage ? 5_000 : 45_000;
+  const speakFirst = call.kind === 'errand' && !inbound
+    ? setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, speakAfterMs)
     : undefined;
-  const deadAir = call.kind === 'errand' && !onMenu && !inbound
+  const deadAir = call.kind === 'errand' && !inbound
     ? setTimeout(() => {
       if (!botSpoke && !ended) { console.warn(`[phone] ${callId}: nothing happened on the line, hanging up`); hangup(0); }
-    }, 75_000)
+    }, onMenu ? 120_000 : 75_000)
     : undefined;
 
   ws.on('open', () => {

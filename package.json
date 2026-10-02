@@ -65,6 +65,7 @@
     "test:web-task": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-web-task.ts",
     "test:jobs": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-jobs.ts",
     "test:followups": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-followups.ts",
+    "test:calendar-alerts": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-calendar-alerts.ts",
     "test:chrome-health": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-chrome-health.ts"
   },
   "dependencies": {

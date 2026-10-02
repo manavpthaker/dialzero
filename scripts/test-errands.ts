@@ -164,7 +164,17 @@ try {
     db.updateErrand(id, { target_idx: 2, next_check_at: null });
     await errands.processErrand(id);
     assert.equal(db.getErrand(id)!.status, 'waiting');
-    assert.match(told.filter((x) => x.id === id)[0].text, /tried every approved number/);
+    assert.match(told.filter((x) => x.id === id)[0].text, /Give me another number, want me to email them, or drop it\?/);
+  });
+
+  await check('a stuck call is explained in plain words: the menu path, not "used all 2 calls"', async () => {
+    const id = activate(base);
+    db.addErrandEvent(id, 'call_result', 'Springfield Public Works: retry_later — Connected, but no one engaged (likely a phone menu, hold music, or silence). Menu: Pressed 1 (scheduling or services); Pressed 9 (deliver message and exit the system)');
+    db.addErrandEvent(id, 'call_result', 'Springfield Public Works: retry_later — Connected, but no one engaged (likely a phone menu, hold music, or silence). Menu: Pressed 9 (deliver message and exit the system)');
+    const said = errands.whatHappened(id);
+    assert.match(said, /couldn't reach a person in 2 calls/);
+    assert.match(said, /I pressed 9 \(deliver message and exit the system\)/);
+    assert.doesNotMatch(said, /retry_later|Menu:/);
   });
 
   await check('hitting the call cap blocks; more_calls restarts', async () => {

@@ -327,6 +327,30 @@ function finish(row: ErrandRow, status: 'done' | 'failed', outcome: string): voi
   addErrandEvent(row.id, status, outcome);
 }
 
+/**
+ * What the calls actually ran into, in plain words, for the owner: how many
+ * calls, where they got stuck (a menu, voicemail, no answer), and the keys
+ * pressed. "Used all 2 calls" told the owner nothing they could act on.
+ */
+export function whatHappened(id: number): string {
+  const results = getErrandEvents(id, 30).filter((e) => e.type === 'call_result').reverse();
+  if (!results.length) return "couldn't get through.";
+  const lines = results.map((e) => String(e.detail ?? '').replace(/^[^:]+:\s*/, ''));
+  const menus = lines.map((l) => l.match(/Menu: (.*)$/)?.[1]).filter(Boolean) as string[];
+  const kinds = lines.map((l) => (/no one engaged|hold music|silence/i.test(l) ? 'menu' : /voicemail/i.test(l) ? 'voicemail' : /no answer/i.test(l) ? 'no answer' : 'other'));
+  const n = results.length;
+  let what: string;
+  if (kinds.every((k) => k === 'menu')) {
+    const path = menus.at(-1)?.replace(/Pressed (\d) \(([^)]*)\)/g, '$1 ($2)').replace(/;\s*/g, ' → ');
+    what = `couldn't reach a person in ${n} call${n === 1 ? '' : 's'}. Their phone menu${path ? ` (I pressed ${path})` : ''} never got me to anyone or a working voicemail.`;
+  } else if (kinds.every((k) => k === 'no answer')) {
+    what = `no one picked up (${n} call${n === 1 ? '' : 's'}).`;
+  } else {
+    what = `${n} call${n === 1 ? '' : 's'}; last one: ${lines.at(-1)!.replace(/\s*Menu:.*$/, '').replace(/^(retry_later|voicemail|blocked|failed)\s*[—-]\s*/, '')}`;
+  }
+  return what;
+}
+
 function block(row: ErrandRow, reason: string): void {
   updateErrand(row.id, { status: 'waiting', outcome: reason, call_state: null, call_started_at: null, next_check_at: null });
   addErrandEvent(row.id, 'blocked', reason);
@@ -369,12 +393,12 @@ export async function processErrand(id: number): Promise<void> {
     }
     if (row.calls_made >= env.max_calls) {
       block(row, `Used all ${env.max_calls} calls without finishing.`);
-      await tellOwner(row, 'blocked', `used all ${env.max_calls} calls without finishing. Allow more calls, add another place, or drop it?`);
+      await tellOwner(row, 'blocked', `${whatHappened(row.id)} Want me to try again tomorrow morning, email them, or drop it?`);
       return;
     }
     if (row.target_idx >= env.targets.length) {
       block(row, 'Tried every approved number.');
-      await tellOwner(row, 'blocked', 'tried every approved number without finishing. Give me another place to call, or drop it?');
+      await tellOwner(row, 'blocked', `${whatHappened(row.id)} Give me another number, want me to email them, or drop it?`);
       return;
     }
     if (!errandsEnabled()) return;

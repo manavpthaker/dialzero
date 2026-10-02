@@ -233,7 +233,11 @@ const defaultDeps: BookingDeps = {
     const { runAgent } = await import('./agent.js');
     const { getSystemUser } = await import('./lib/system-user.js');
     // Browser jobs take many small steps (snapshot, click, screenshot...).
-    return runAgent(BOOKING_GROUP, getSystemUser(), prompt, undefined, undefined, undefined, undefined, undefined, undefined, { maxTurns: BROWSER_MAX_TURNS });
+    // They're work the owner asked for, so they bill like scheduled work with an
+    // audience ('batch': only the global daily cap), not the background
+    // allowance, even when a job resumes later with no chat context.
+    const { withLlmContext } = await import('./lib/llm-context.js');
+    return withLlmContext({ caller: 'web-job', lane: 'batch', groupKey: BOOKING_GROUP.key }, () => runAgent(BOOKING_GROUP, getSystemUser(), prompt, undefined, undefined, undefined, undefined, undefined, undefined, { maxTurns: BROWSER_MAX_TURNS }));
   },
   // Dynamic imports keep this module out of the tools/index.ts import cycle.
   createEvent: async (opts) => (await import('./tools/calendar.js')).createCalendarEventRaw(opts),
@@ -292,14 +296,20 @@ const TIMEOUT = Symbol('timeout');
  * and returns the sub-agent's final message, or null when it ran out of time.
  * Throws on a browser error.
  */
-export async function runBrowserSubAgent(label: string, prompt: string, timeoutMs: number): Promise<string | null> {
+export async function runBrowserSubAgent(
+  label: string, prompt: string, timeoutMs: number,
+  hooks: { onStart?: () => void; onEnd?: () => void } = {},
+): Promise<string | null> {
   const d = deps;
   const out = await d.withLock(label, async () => {
+    // Inside the lock: only the run that actually holds the browser is "active".
     windowUntil = Date.now() + timeoutMs;
+    hooks.onStart?.();
     try {
       return await withTimeout(d.runBrowser(prompt), timeoutMs);
     } finally {
       windowUntil = 0;
+      hooks.onEnd?.();
     }
   });
   return out === TIMEOUT ? null : out;

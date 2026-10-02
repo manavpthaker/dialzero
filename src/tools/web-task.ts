@@ -10,11 +10,12 @@ import { getTimezone } from '../config.js';
 import { proposeAction, getAction } from '../db.js';
 import { checkActionsEnabled } from '../lib/spend-cap.js';
 import { ownerAskedForWebTask } from '../lib/owner-request.js';
-import { bookingDeps, looksLikeCardNumber } from '../web-booking.js';
-import { prepareWebTask, startWebTask, activeWebTaskRun, WEB_TASK_NOT_CONNECTED, type WebTaskPayload } from '../web-task.js';
+import { bookingDeps, looksLikeCardNumber, PAYMENT_FIELD } from '../web-booking.js';
+import { onePasswordReady, findLoginFor, loginSecrets, totpCode } from '../lib/onepassword.js';
+import { prepareWebTask, startWebTask, activeWebTaskRun, noteFillLoginTried, WEB_TASK_NOT_CONNECTED, type WebTaskPayload } from '../web-task.js';
 import { takeCode, takeLink, matchItem, answerItem } from '../jobs.js';
 import { bookingWindowOpen } from '../web-booking.js';
-import { browserTools } from './browser.js';
+import { browserTools, quietCommandInGroupTab } from './browser.js';
 
 export const webTaskTools: ToolDef[] = [
   {
@@ -185,5 +186,96 @@ export const desktopTool: ToolDef = {
     const { computerUseTools, approveComputerUseTask } = await import('./computer-use.js');
     approveComputerUseTask('web-task-desktop');
     return computerUseTools[0].handler(input, { groupKey: 'web-task-desktop' });
+  },
+};
+
+// For the web-task sub-agent: sign in with the owner's 1Password login for
+// this site (OP_VAULT only). The model picks the fields from snapshot; the
+// username and password go from 1Password straight into the page with quiet
+// commands, so they're never in a prompt, a tool result, or a log line.
+async function jobPageHost(): Promise<string | null> {
+  try {
+    const r = await quietCommandInGroupTab('booking', 'get_current_url', {});
+    return new URL(String(r.url ?? '')).hostname;
+  } catch { return null; }
+}
+
+async function typeSecretAt(index: number, value: string, requireType: string, guardCards = true): Promise<string | null> {
+  const click = await quietCommandInGroupTab('booking', 'real_click', { index });
+  if (click.error) return String(click.error);
+  const typed = await quietCommandInGroupTab('booking', 'real_type', { value, requireType, ...(guardCards ? { fieldGuard: PAYMENT_FIELD.source } : {}) });
+  return typed.error ? String(typed.error) : null;
+}
+
+export const fillLoginTool: ToolDef = {
+  definition: {
+    name: 'fill_login',
+    description: 'Sign in with the owner\'s saved login for THIS site from 1Password. Take a snapshot first. Many sites ask in two steps: on the email page pass only username_index, click Continue/Next, snapshot the next page, then call fill_login again with password_index. On a page with both fields pass both. Then click the sign-in button. You never see the login itself.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        username_index: { type: 'number', description: 'Snapshot index of the username/email field (omit if not shown).' },
+        password_index: { type: 'number', description: 'Snapshot index of the password field.' },
+      },
+    },
+  },
+  handler: async (input) => {
+    // Log what happened (never the login itself) so a failed sign-in can be diagnosed.
+    const out = await fillLogin(input);
+    noteFillLoginTried();
+    console.log(`[fill_login] ${out}`);
+    return out;
+  },
+};
+
+async function fillLogin(input: Record<string, unknown>): Promise<string> {
+  {
+    const run = activeWebTaskRun();
+    if (!run || !bookingWindowOpen()) return 'Refused: no website job is running.';
+    if (input.username_index == null && input.password_index == null) return 'Pass username_index (email page) and/or password_index (password page) from a snapshot.';
+    if (!onePasswordReady()) return '1Password is not connected. Return needs_owner login.';
+    const host = await jobPageHost();
+    if (!host) return "Couldn't read this page's address. Take a snapshot and try again.";
+    const match = await findLoginFor(host);
+    if ('error' in match) return `${match.error} Return needs_owner login and say so (they can add it to the vault).`;
+    let secrets: { username: string; password: string };
+    try { secrets = await loginSecrets(match.id); } catch { return `Couldn't read the ${match.title} login from 1Password. Return needs_owner login.`; }
+    if (input.username_index != null && secrets.username) {
+      const err = await typeSecretAt(Number(input.username_index), secrets.username, 'email|text|tel');
+      if (err) return `Username not filled: ${err}`;
+    }
+    if (input.password_index == null) {
+      return `Filled the ${match.title} email/username. Click Continue/Next, take a snapshot, then call fill_login with password_index.`;
+    }
+    if (!secrets.password) return `The ${match.title} login has no password saved. Return needs_owner login.`;
+    const err = await typeSecretAt(Number(input.password_index), secrets.password, 'password');
+    if (err) return `Password not filled: ${err}`;
+    return `Filled the ${match.title} login. Now click the sign-in button.`;
+  }
+}
+
+export const fill2faTool: ToolDef = {
+  definition: {
+    name: 'fill_2fa_code',
+    description: 'Fill the 6-digit code from an authenticator app, generated by 1Password for this site\'s login. Pass the snapshot index of the code field, then click verify. For codes sent by text or email, return needs_owner code instead (those are fetched automatically).',
+    input_schema: {
+      type: 'object' as const,
+      properties: { index: { type: 'number', description: 'Snapshot index of the code field.' } },
+      required: ['index'],
+    },
+  },
+  handler: async (input) => {
+    const run = activeWebTaskRun();
+    if (!run || !bookingWindowOpen()) return 'Refused: no website job is running.';
+    if (!onePasswordReady()) return '1Password is not connected. Return needs_owner code.';
+    const host = await jobPageHost();
+    const match = host ? await findLoginFor(host) : { error: "Couldn't read this page's address." };
+    if ('error' in match) return `${match.error} Return needs_owner code.`;
+    const code = await totpCode(match.id);
+    if (!code) return `The ${match.title} login has no authenticator code in 1Password. Return needs_owner code.`;
+    // Code boxes are often labelled "security code", which the card guard would block;
+    // the field-type check is what keeps this code in a code box.
+    const err = await typeSecretAt(Number(input.index), code, 'text|tel|number|password', false);
+    return err ? `Code not filled: ${err}` : 'Filled the code. Now click verify/continue.';
   },
 };

@@ -16,6 +16,7 @@ const wb = await import('../src/web-booking.js');
 const wt = await import('../src/web-task.js');
 wt.setWebTaskCodeLookup(async () => null); // never touch real email/texts in tests
 wt.setWebTaskEmailLookup(async () => null);
+wt.setWebTaskPageUrlReader(async () => null);
 const jobs = await import('../src/jobs.js');
 const { toolRegistry } = await import('../src/tools/index.js');
 const { getOwner } = await import('../src/config.js');
@@ -195,6 +196,11 @@ try {
     assert.equal(cf.codeFromText("Here's your verification code 415836", ''), '415836');
     assert.equal(cf.codeFromText('Your PLAUD sign-in code', 'Use this code: 482913 to sign in. © 2026 Plaud'), '482913');
     assert.equal(cf.codeFromText('Order shipped', 'Arrives 2026-10-03'), null);
+    // An airline's wording: the code sits inside link text, after "is".
+    assert.equal(cf.codeFromText("Here's your verification code", 'Example Air - Example Miles [Your Example Air verification code is 593104. This code will expire in 5 minutes.](https://notification.example.com/x)'), '593104');
+    assert.equal(cf.codeFromText('Sign in', 'Your one-time code for Acme is: 4821-07'), '482107');
+    assert.equal(cf.codeFromText('Sign in to Shopify', 'Your login code is K7Q2ZP'), 'K7Q2ZP');
+    assert.equal(cf.codeFromText('Code of conduct update', 'We updated our code of conduct in 2026.'), null, 'a year is not a code');
     cf.setCodeFinderDeps({ searchEmail: async () => linkedin.replace(/LinkedIn/g, 'Plaud'), ownerHandles: () => [] });
     assert.equal((await cf.findEmailCode(['plaud'], Date.parse('2099-01-01T09:58')))?.code, '415836');
     assert.equal(await cf.findEmailCode(['netflix'], Date.parse('2099-01-01T09:58')), null, 'another company\'s code is ignored');
@@ -266,6 +272,26 @@ try {
     wt.setWebTaskCodeLookup(async () => null);
     assert.deepEqual(opened, ['https://billing.stripe.com/p/session/login_SECRET123']);
     assert.equal(told.length - before, 1, 'no "click the link" text to them');
+  });
+
+  await check('two jobs queued for the browser: each run sees itself as the active job', async () => {
+    let chain: Promise<unknown> = Promise.resolve();
+    const seen: Array<number | null> = [];
+    const ids: number[] = [];
+    wb.setBookingDeps({
+      isConnected: () => true,
+      runBrowser: async () => { await wait(30); seen.push(wt.activeWebTaskRun()?.actionId ?? null); return '{"status":"done","summary":"ok"}'; },
+      notify: async () => {},
+      // A real FIFO lock, like lib/browser-lock.
+      withLock: async (_l, fn) => { const run = chain.then(fn); chain = run.catch(() => {}); return run; },
+      timeoutMs: 2000,
+    });
+    const a = wt.startWebTask({ task: 'read A', site: 'https://a.example.com' } as never, 'A.', 'admin');
+    const b = wt.startWebTask({ task: 'read B', site: 'https://b.example.com' } as never, 'B.', 'admin');
+    ids.push(a.id, b.id);
+    await Promise.all([a.done, b.done]);
+    assert.deepEqual(seen, ids, 'each run saw its own job, never null or the other');
+    assert.equal(wt.activeWebTaskRun(), null);
   });
 
   console.log(`\nJob tracker tests passed: ${passed} checks.`);

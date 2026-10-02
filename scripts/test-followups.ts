@@ -16,6 +16,7 @@ const wb = await import('../src/web-booking.js');
 const wt = await import('../src/web-task.js');
 wt.setWebTaskCodeLookup(async () => null); // never touch real email/texts in tests
 wt.setWebTaskEmailLookup(async () => null);
+wt.setWebTaskPageUrlReader(async () => null);
 const jobs = await import('../src/jobs.js');
 const { toolRegistry } = await import('../src/tools/index.js');
 const { getOwner } = await import('../src/config.js');

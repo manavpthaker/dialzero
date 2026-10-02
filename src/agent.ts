@@ -1032,6 +1032,10 @@ export async function runAgent(
     if (!systemAuthored) saveMessage(groupConfig.key, 'assistant', 'assistant', response);
   }
 
+  // A scheduled/background run that produced nothing (e.g. the budget refused
+  // every call) says nothing: callers send only non-empty replies, and an
+  // apology texted at 11am for a check the owner never asked about is noise.
+  if (!response && systemAuthored) return '';
   return response || 'Sorry, I ran out of processing steps. Try a simpler request or break it into parts.';
 }
 

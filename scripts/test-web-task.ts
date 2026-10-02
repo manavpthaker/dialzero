@@ -15,6 +15,7 @@ const wb = await import('../src/web-booking.js');
 const wt = await import('../src/web-task.js');
 wt.setWebTaskCodeLookup(async () => null); // never touch real email/texts in tests
 wt.setWebTaskEmailLookup(async () => null);
+wt.setWebTaskPageUrlReader(async () => null);
 const { toolRegistry } = await import('../src/tools/index.js');
 const { looksLikeWebTask } = await import('../src/tools/computer-use.js');
 const { getOwner } = await import('../src/config.js');
@@ -216,6 +217,35 @@ try {
     } finally {
       const { rmSync: rm } = await import('node:fs');
       rm(receipt, { force: true });
+    }
+  });
+
+  await check('1Password: vault logins matched by site, never shown, and off without a token', async () => {
+    const opm = await import('../src/lib/onepassword.js');
+    assert.equal(opm.siteOf('web.plaud.ai'), 'plaud.ai');
+    assert.equal(opm.siteOf('login.example.co.uk'), 'example.co.uk');
+    const saved = process.env.OP_SERVICE_ACCOUNT_TOKEN;
+    delete process.env.OP_SERVICE_ACCOUNT_TOKEN;
+    assert.equal(opm.onePasswordReady(), false);
+    const fill = toolRegistry['booking-browser'].find((t) => t.definition.name === 'fill_login')!;
+    assert.match(String(await fill.handler({ password_index: 3 }, { groupKey: 'booking' })), /no website job is running/);
+    process.env.OP_SERVICE_ACCOUNT_TOKEN = 'ops_test';
+    const calls: string[][] = [];
+    opm.setOpRunnerForTests(async (args) => {
+      calls.push(args);
+      if (args[1] === 'list') return JSON.stringify([
+        { id: 'a1', title: 'Plaud', urls: [{ href: 'https://web.plaud.ai/login' }] },
+        { id: 'b2', title: 'Netflix', urls: [{ href: 'netflix.com' }] },
+      ]);
+      return '[]';
+    });
+    try {
+      assert.deepEqual(await opm.findLoginFor('app.plaud.ai'), { id: 'a1', title: 'Plaud' });
+      assert.match(JSON.stringify(await opm.findLoginFor('evil-plaud.ai.example.com')), /No login for example\.com/);
+      assert.ok(calls.every((c) => c.includes('--vault') && c.includes('Assistant')), 'only the Assistant vault');
+    } finally {
+      opm.setOpRunnerForTests(null);
+      if (saved === undefined) delete process.env.OP_SERVICE_ACCOUNT_TOKEN; else process.env.OP_SERVICE_ACCOUNT_TOKEN = saved;
     }
   });
 

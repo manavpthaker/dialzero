@@ -23,7 +23,15 @@ export function codeFromText(subject: string, body: string): string | null {
   const clean = (t: string) => t.replace(/\(https?:[^)]*\)/g, ' ').replace(/https?:\/\/\S+/g, ' ');
   const s = clean(subject);
   const b = clean(body);
-  const near = (t: string) => t.match(/\b(?:code|passcode|otp|pin)\b[^0-9A-Z]{0,24}(\d{4,8}|[A-Z0-9]{6,8})\b/i)?.[1];
+  // "code: 123456", "code is 123456", "your code for X is 1234-56"... the
+  // first 4-8 digit number within a few words after the code word. (The old
+  // pattern allowed only punctuation between, so "code is 123456" — a common
+  // wording — never matched.) Letter-and-digit codes must be uppercase.
+  const near = (t: string) => {
+    const joined = t.replace(/(\d)[ -](?=\d)/g, '$1');
+    return joined.match(/\b(?:code|passcode|otp|pin)\b.{0,48}?\b(\d{4,8})\b/i)?.[1]
+      ?? joined.match(/\b(?:code|passcode|OTP|PIN)\b.{0,48}?\b((?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,8})\b/)?.[1];
+  };
   const subjDigits = CODE_WORDS.test(s) ? s.match(/\b(\d{4,8})\b/)?.[1] : undefined;
   const alone = b.match(/^[\s#*>\[]*(\d{4,8})[\s*\]]*$/m)?.[1];
   const hit = near(s) ?? subjDigits ?? near(b) ?? alone ?? null;
@@ -157,8 +165,12 @@ export async function findEmailLink(brands: string[], sinceMs: number): Promise<
 
 /** A code or a sign-in link, whichever arrives, for up to `waitMs`. */
 export async function findFreshSignIn(brands: string[], sinceMs: number, waitMs = 120_000, everyMs = 15_000): Promise<{ code?: FoundCode; link?: FoundLink } | null> {
-  const until = Date.now() + waitMs;
+  let until = Date.now() + waitMs;
+  let extended = false;
   for (;;) {
+    // The email source can be unreachable for minutes at a time (a code can
+    // arrive while it's down). Give it longer.
+    if (!extended && await emailUnreachable()) { until = Math.max(until, Date.now() + 5 * 60_000); extended = true; }
     const code = findForwardedTextCode(brands, sinceMs) ?? await findEmailCode(brands, sinceMs);
     if (code) return { code };
     const link = await findEmailLink(brands, sinceMs);
@@ -166,6 +178,13 @@ export async function findFreshSignIn(brands: string[], sinceMs: number, waitMs 
     if (Date.now() + everyMs > until) return null;
     await new Promise((r) => setTimeout(r, everyMs));
   }
+}
+
+async function emailUnreachable(): Promise<boolean> {
+  try {
+    const out = await deps.searchEmail('code', 'newer_than:1h');
+    return /^Spark error|can't access/i.test(out) && !/no email source configured/.test(out);
+  } catch { return true; }
 }
 
 /** The address a company emails them at (most common To: on its mail), so a sign-in page can use it. */

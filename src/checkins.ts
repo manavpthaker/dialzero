@@ -206,6 +206,19 @@ export function startCheckins(): void {
   console.log(`[checkin] scheduled morning "${morning}", evening "${evening}" (${getTimezone()})`);
 }
 
+/** The last check-in with when it went out, if within `hours`. */
+export function getRecentCheckinMeta(hours = 12): { at: number; text: string } | null {
+  const raw = getMemory(GROUP, LAST_SENT_KEY);
+  if (!raw) return null;
+  try {
+    const d = JSON.parse(raw) as { at: string; text: string };
+    const at = new Date(d.at).getTime();
+    return Date.now() - at < hours * 3600_000 ? { at, text: d.text } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The last check-in text if sent within `hours`, so a terse reply ("done 2") can be resolved. */
 export function getRecentCheckin(hours = 12): string | null {
   const raw = getMemory(GROUP, LAST_SENT_KEY);

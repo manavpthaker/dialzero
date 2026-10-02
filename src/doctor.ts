@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, statSync } from 'fs';
+import { onePasswordReady } from './lib/onepassword.js';
 import { isBrowserConnected, browserBridgeStarted } from './browser-bridge.js';
 import { chromeDownForMs } from './lib/chrome-health.js';
 import { readRunningSha, currentHeadSha } from './lib/running-sha.js';
@@ -188,6 +189,15 @@ function checkBackup(): Check {
 //      `git pull` fetches before the ff it then rejects, so the remote-tracking
 //      ref is fresh and this needs no network from the health check itself.
 // Surfaces in the 09:00 alive-ping so a stuck deploy is seen by morning.
+// 1Password for website-job sign-ins: set up or not (a bad token shows up as a
+// failed fill, which the job reports as needing the owner).
+function checkOnePassword(): Check {
+  if (!process.env.OP_SERVICE_ACCOUNT_TOKEN) return { name: '1password', status: 'ok', detail: 'not set up (website jobs ask the owner to log in)' };
+  return onePasswordReady()
+    ? { name: '1password', status: 'ok', detail: `service account set, vault "${process.env.OP_VAULT || 'Assistant'}"` }
+    : { name: '1password', status: 'warn', detail: 'OP_SERVICE_ACCOUNT_TOKEN is set but the op CLI is missing (brew install 1password-cli)' };
+}
+
 // Chrome bridge: only meaningful inside the bot process (the CLI has no bridge).
 function checkChrome(): Check {
   if (!browserBridgeStarted()) return { name: 'chrome', status: 'ok', detail: 'not checked (bridge not running in this process)' };
@@ -651,6 +661,7 @@ export function runHealthCheck(): HealthReport {
   checks.push(checkMemoryAudit());
   checks.push(checkSync());
   checks.push(checkChrome());
+  checks.push(checkOnePassword());
   checks.push(...checkDaemonTicks());
   const localLlm = checkLocalLlm();
   if (localLlm) checks.push(localLlm);

@@ -7,6 +7,7 @@ import { getPendingTasks, getMemory, setMemory, getOverdueTasks, getSchedulableT
 import { etHour, isQuietHours, todayET } from './lib/time-et.js';
 import { getSystemUser } from './lib/system-user.js';
 import { withLlmContext } from './lib/llm-context.js';
+import { calendarAlerts, type CalEvent } from './lib/calendar-alerts.js';
 
 const MAX_TASKS_PER_HEARTBEAT = 5;
 const TASK_HEARTBEAT_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 hours
@@ -32,38 +33,27 @@ function formatTaskLine(t: Task): string {
 
 async function heartbeatCalendarCheck() {
   if (isQuietHours()) return;
-  const user = getSystemUser();
   const target = process.env.GROUP_ADMIN || process.env.GROUP_HOME || getDefaultRecipient();
-
   if (!target) return;
-
-  const group = groupConfig('home', 'Home', ['calendar', 'tasks', 'memory'], 'context/personal');
-
   try {
-    const response = await withLlmContext(
-      { caller: 'heartbeat:calendar', lane: 'ambient', groupKey: group.key },
-      () => runAgent(group, user,
-      `Heartbeat check — look at my calendar for the next 2 hours. Only send a message if one of these is true:
-
-(a) A meeting starts in 15-25 minutes AND has a physical location/address — send a "time to leave" with the location. If the session block shows my current location, skip it when I'm already there, and say roughly how far away I am when I'm not.
-(b) There is a hard scheduling conflict in the next 2 hours.
-
-Otherwise respond with exactly "HEARTBEAT_CLEAR" and nothing else. Do NOT send for routine internal meetings or back-to-back syncs unless there's a conflict.
-
-Note: external-meeting prep (30 min before) is handled by the separate meeting-daemon process; do NOT send a prep DM here.`
-      ),
-    );
-
-    if (response && !response.includes('HEARTBEAT_CLEAR')) {
-      await sendInterrupt({
-        source: 'heartbeat',
-        // Hour-bucketed: the same 2-hour calendar window re-examined 30 minutes
-        // later is the same claim, not a new one.
-        subject: `heartbeat:calendar:${todayET()}:${etHour()}`,
-        kind: 'time-critical',
-        text: response,
-        target,
-      });
+    // Plain code, no model: time-to-leave for in-person events, and clashes.
+    const { listRawEvents } = await import('./tools/calendar.js');
+    const now = Date.now();
+    const raw = await listRawEvents(new Date(now).toISOString(), new Date(now + 2 * 3_600_000).toISOString());
+    const events: CalEvent[] = raw
+      .filter((e) => e.start?.dateTime && e.end?.dateTime)
+      .map((e) => ({
+        id: e.id ?? `${e.summary}-${e.start?.dateTime}`,
+        title: e.summary ?? 'Event',
+        start: e.start!.dateTime!,
+        end: e.end!.dateTime!,
+        location: e.location,
+        declined: (e.attendees ?? []).some((a) => a.self && a.responseStatus === 'declined'),
+        free: e.transparency === 'transparent',
+      }));
+    for (const alert of calendarAlerts(events, now)) {
+      // Subject per event / pair: the arbiter's cooldown keeps it to one text.
+      await sendInterrupt({ source: 'heartbeat', subject: alert.subject, kind: 'time-critical', text: alert.text, target });
     }
   } catch (err) {
     console.error('[Heartbeat] Calendar check failed:', err);

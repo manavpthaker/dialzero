@@ -109,6 +109,13 @@ export async function startMcpServers(): Promise<Record<string, ToolDef[]>> {
   const result: Record<string, ToolDef[]> = {};
 
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
+    // A server whose ${VAR} references aren't set (e.g. no INSTACART_API_KEY)
+    // can't start; skip it quietly instead of failing on every boot.
+    const missing = [...JSON.stringify(serverConfig).matchAll(/\$\{([A-Z0-9_]+)\}/g)].map((m) => m[1]).filter((k) => !process.env[k]?.trim());
+    if (missing.length) {
+      console.log(`[MCP] ${name}: skipped (set ${missing.join(', ')} to enable)`);
+      continue;
+    }
     try {
       const target = serverConfig.url || `${serverConfig.command} ${(serverConfig.args || []).join(' ')}`;
       console.log(`[MCP] Starting ${name} (${target})...`);
