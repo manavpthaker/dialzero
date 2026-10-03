@@ -30,6 +30,7 @@ It's not an app you open. It's a contact in your phone.
 | "What are you working on?" | One short list: what's waiting on you, what it's doing, and what it's keeping an eye on. Say "stop" about any of it. |
 | "Make sure they refund me" | Keeps checking your email (and follows up on its own after a cancellation) and only texts you if something's wrong. |
 | A voice memo | Transcribes it and files away what matters. |
+| "What did I tell Alex at lunch?" | If you use [Omi](https://omi.me) to record your conversations, it looks it up, and quietly keeps the promises, to-dos and people from each one (optional). |
 
 Plus a shared **family chat**: add it to a group text with your partner and it keeps a shared calendar and grocery list.
 

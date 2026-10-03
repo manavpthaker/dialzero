@@ -21,6 +21,7 @@ import { startErrands } from './errands.js';
 import { startWakeUpCalls } from './wakeup.js';
 import { startWebTaskRunner } from './web-task.js';
 import { startFollowups } from './followups.js';
+import { startOmiSync } from './omi-sync.js';
 import { recordRunningSha } from './lib/running-sha.js';
 import { startChromeHealth } from './lib/chrome-health.js';
 import { startCheckins } from './checkins.js';
@@ -271,6 +272,7 @@ async function main() {
     ['hygiene', startHygieneLoop],
     ['family-scheduler', () => { startFamilyRuntimeScheduler(); }],
     ['email-reconciliation', startEmailReconciliationRuntime],
+    ['omi-sync', startOmiSync],                    // also needs OMI_MCP_KEY; OMI_SYNC_ENABLED
   ];
 
   const started: string[] = [];

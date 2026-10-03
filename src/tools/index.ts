@@ -205,6 +205,25 @@ export function createFamilyMcpAliasTools(
   );
 }
 
+// Connectors over the owner's private recordings (Omi: what they said and heard,
+// their screen history). Only the lookup tools are kept (no creating/deleting
+// their Omi data), and only the owner's own runs may call them: a DM from anyone
+// else also lands in the admin tool set.
+const OWNER_ONLY_READ_MCP = new Set(['omi']);
+export function ownerOnlyReadTools(tools: readonly ToolDef[]): ToolDef[] {
+  return tools
+    .filter((t) => /^mcp_[a-z0-9-]+_(get|search)_/.test(t.definition.name))
+    .map((tool) => ({
+      definition: tool.definition,
+      handler: async (input, context) => {
+        if (!context?.userId || context.userId !== getProfileConfig().owner.id) {
+          return 'This is private to the owner.';
+        }
+        return tool.handler(input, context);
+      },
+    }));
+}
+
 export interface McpRegistrationResult {
   registered: string[];
   familyAliases: string[];
@@ -242,7 +261,7 @@ export function registerDiscoveredMcpTools(
       result.rejected.push(serverName);
       continue;
     }
-    toolRegistry[serverName] = tools;
+    toolRegistry[serverName] = OWNER_ONLY_READ_MCP.has(serverName) ? ownerOnlyReadTools(tools) : tools;
     result.registered.push(serverName);
     console.log(`[Tools] Registered MCP tools: ${serverName} (${tools.length} tools)`);
 

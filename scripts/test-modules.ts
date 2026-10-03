@@ -79,10 +79,11 @@ try {
   });
 
   await check('every module tool key exists in the registry and every admin key has an owner', () => {
+    // MCP connector keys (mcp-servers.json) are registered at boot, not in the static registry.
+    const mcp = new Set(Object.keys((JSON.parse(readFileSync(new URL('../mcp-servers.json', import.meta.url), 'utf8')) as { mcpServers: Record<string, unknown> }).mcpServers));
     for (const m of modules.MODULES) {
-      for (const key of m.tools ?? []) assert.ok(toolRegistry[key], `${m.id} claims unknown tool key ${key}`);
+      for (const key of m.tools ?? []) assert.ok(toolRegistry[key] || mcp.has(key), `${m.id} claims unknown tool key ${key}`);
     }
-    const mcp = new Set(['instacart', 'spotify']);
     process.env.MODULES_ON = modules.MODULES.map((m) => m.id).join(',');
     for (const key of groups.adminTools()) {
       assert.ok(mcp.has(key) || modules.moduleFor('tools', key), `admin key ${key} has no module`);

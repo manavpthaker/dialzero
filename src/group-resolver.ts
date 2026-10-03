@@ -22,7 +22,7 @@ const disabledGroupIds = new Set<string>();
 // The owner's full toolset. Used by the Admin group and by the DM fallback in
 // resolveGroup, so the two can't drift apart.
 // Filtered to the tools of switched-on modules (src/modules.ts) at use time.
-const ADMIN_TOOLS = ['calendar', 'github', 'web', 'linkedin', 'codex', 'household', 'browser', 'memory', 'tasks', 'email', 'email-reconciliation', 'people', 'relationships', 'messages', 'recall', 'actions', 'errands', 'web-booking', 'instacart', 'spotify', 'computer-use', 'notion'];
+const ADMIN_TOOLS = ['calendar', 'github', 'web', 'linkedin', 'codex', 'household', 'browser', 'memory', 'tasks', 'email', 'email-reconciliation', 'people', 'relationships', 'messages', 'recall', 'actions', 'errands', 'web-booking', 'instacart', 'spotify', 'computer-use', 'notion', 'omi'];
 
 export function adminTools(): string[] {
   return enabledToolKeys(ADMIN_TOOLS);

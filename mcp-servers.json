@@ -6,6 +6,12 @@
         "Authorization": "Bearer ${INSTACART_API_KEY}"
       }
     },
+    "omi": {
+      "url": "https://api.omi.me/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer ${OMI_MCP_KEY}"
+      }
+    },
     "spotify": {
       "command": "/opt/homebrew/bin/npx",
       "args": ["-y", "spotify-mcp-server"],

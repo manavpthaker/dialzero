@@ -25,7 +25,10 @@ function writeRefreshToken(token: string): boolean {
 
 const CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET;
-const REDIRECT_URI = 'http://localhost:3333/callback';
+// GOOGLE_AUTH_REDIRECT lets you finish the sign-in from another device, e.g. a
+// phone on your Tailscale network (https://<mac>.<tailnet>.ts.net:3333/callback,
+// served to this port).
+const REDIRECT_URI = process.env.GOOGLE_AUTH_REDIRECT || 'http://localhost:3333/callback';
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error('Missing GOOGLE_CALENDAR_CLIENT_ID or GOOGLE_CALENDAR_CLIENT_SECRET in .env');
@@ -49,7 +52,7 @@ const authUrl = oauth2.generateAuthUrl({
 
 console.log('\nThis grants Calendar, Tasks and Gmail (read, archive, drafts, send).');
 console.log('If you authorized before email moved to Gmail, run this once more so the new Gmail permission is granted.');
-console.log('\n1. Make sure http://localhost:3333/callback is an authorized redirect URI in your Google Cloud Console.');
+console.log(`\n1. Make sure ${REDIRECT_URI} is an authorized redirect URI in your Google Cloud Console.`);
 console.log('   → https://console.cloud.google.com/apis/credentials\n');
 console.log('2. Open this URL in your browser:\n');
 console.log(authUrl);
