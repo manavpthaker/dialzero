@@ -225,6 +225,7 @@ export const MODULES: ModuleSpec[] = [
       { key: 'USER_OWNER_EMAIL', description: 'Your iMessage email address, if you text from one.' },
       { key: 'ASSISTANT_TIMEZONE', example: 'America/Chicago', description: 'Your timezone, if different from this Mac\'s. Usually set by the setup interview.' },
       { key: 'DIALZERO_DENYLIST', description: 'Maintainers only: path to a private list of words that must never be committed (npm run check:portable).' },
+      { key: 'OPENAI_RESEARCH_MODEL', description: 'Model for the deep research tool (things to do, trips, where to eat). Defaults to OPENAI_MODEL.' },
       { key: 'TRIGGER_WORD', example: '@assistant', description: 'Word that wakes the assistant in group chats. DMs never need it.' },
       { key: 'GROUP_ADMIN', description: 'Optional chat ID for a private group with the assistant. Blank = it texts your number directly.' },
       { key: 'GROUP_HOME', description: 'Optional chat ID for a household group chat.' },
@@ -535,8 +536,8 @@ export const MODULES: ModuleSpec[] = [
     description: 'Joins one family group chat to keep a shared calendar and lists, without ever seeing your private stuff.',
     defaultEnabled: false,
     groups: ['family'],
-    tools: ['family-calendar', 'family-lists', 'family-memory', 'family-web'],
-    start: ['family-scheduler'],
+    tools: ['family-calendar', 'family-lists', 'family-memory', 'family-web', 'family-errands'],
+    start: ['family-scheduler', 'family-requests'],
     env: [
       { key: 'GROUP_FAMILY', required: true, description: 'Chat ID of a new group with only you, your family and the assistant.' },
       { key: 'FAMILY_CALENDAR_ID', required: true, description: 'Written by npm run family:configure. Never "primary".' },

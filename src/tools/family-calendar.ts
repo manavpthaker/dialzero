@@ -586,6 +586,76 @@ function assertDateGrounded(
   }
 }
 
+// ── Repeating events ─────────────────────────────────────────────────────────
+// "Swim every Tuesday at 7", "Sam's birthday every year", "trash pickup
+// every other Monday". Each part of the rule must be in someone's own words.
+export interface FamilyRepeat { frequency: 'daily' | 'weekly' | 'monthly' | 'yearly'; interval?: number; weekdays?: string[]; until?: string; count?: number }
+const DAY_CODES: Record<string, string> = { MO: 'mon', TU: 'tue', WE: 'wed', TH: 'thu', FR: 'fri', SA: 'sat', SU: 'sun' };
+const NUMBER_WORDS: Record<string, number> = { two: 2, three: 3, four: 4, five: 5, six: 6, ten: 10, twelve: 12 };
+
+function parseRepeat(value: unknown): FamilyRepeat {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('repeat must be an object.');
+  const v = value as Record<string, unknown>;
+  const extra = Object.keys(v).filter((k) => !['frequency', 'interval', 'weekdays', 'until', 'count'].includes(k));
+  if (extra.length) throw new Error(`repeat has unsupported fields: ${extra.join(', ')}`);
+  if (!['daily', 'weekly', 'monthly', 'yearly'].includes(String(v.frequency))) throw new Error('repeat.frequency must be daily, weekly, monthly or yearly.');
+  const out: FamilyRepeat = { frequency: v.frequency as FamilyRepeat['frequency'] };
+  if (v.interval !== undefined) {
+    if (!Number.isInteger(v.interval) || (v.interval as number) < 1 || (v.interval as number) > 12) throw new Error('repeat.interval must be 1-12.');
+    out.interval = v.interval as number;
+  }
+  if (v.weekdays !== undefined) {
+    if (!Array.isArray(v.weekdays) || !v.weekdays.length || v.weekdays.some((d) => !(String(d) in DAY_CODES))) throw new Error('repeat.weekdays must be codes like MO, TU.');
+    out.weekdays = [...new Set(v.weekdays.map(String))];
+  }
+  if (v.until !== undefined) out.until = asYmd(v.until, 'repeat.until');
+  if (v.count !== undefined) {
+    if (!Number.isInteger(v.count) || (v.count as number) < 1 || (v.count as number) > 200) throw new Error('repeat.count must be 1-200.');
+    out.count = v.count as number;
+  }
+  if (out.until && out.count) throw new Error('Use repeat.until or repeat.count, not both.');
+  return out;
+}
+
+function assertRepeatGrounded(value: unknown, evidence: AuthorizedFamilyManifestEvidence): void {
+  const rep = parseRepeat(value);
+  const t = evidenceText(evidence).toLowerCase();
+  const dayWord = '(?:sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)[a-z]*';
+  const said: Record<FamilyRepeat['frequency'], RegExp> = {
+    daily: /\b(?:daily|every\s+(?:single\s+)?day|each\s+day|every\s+(?:morning|evening|night))\b/,
+    weekly: new RegExp(`\\b(?:weekly|bi[- ]?weekly|fortnightly|every\\s+(?:other\\s+|\\w+\\s+)?week|(?:every|each)\\s+(?:other\\s+)?${dayWord}|${dayWord}s\\b|on\\s+weekdays|on\\s+weekends|weekdays|weekends)\\b`),
+    monthly: /\b(?:monthly|every\s+(?:other\s+|\w+\s+)?month|each\s+month)\b/,
+    yearly: /\b(?:yearly|annually|annual|every\s+year|each\s+year|birthday|anniversary)\b/,
+  };
+  if (!said[rep.frequency].test(t)) throw new Error(`repeat.frequency "${rep.frequency}" is not in the cited Family messages.`);
+  const interval = rep.interval ?? 1;
+  if (interval === 2 && !/\b(?:every\s+other|bi[- ]?weekly|fortnightly|every\s+(?:2|two)\s+\w+)\b/.test(t)) throw new Error('repeat.interval 2 needs "every other" (or similar) in their words.');
+  if (interval > 2) {
+    const m = t.match(/\bevery\s+(\d+|two|three|four|five|six|ten|twelve)\s+(?:days?|weeks?|months?|years?)\b/);
+    const n = m ? (Number(m[1]) || NUMBER_WORDS[m[1]]) : 0;
+    if (n !== interval) throw new Error(`repeat.interval ${interval} is not in the cited Family messages.`);
+  }
+  for (const d of rep.weekdays ?? []) {
+    const name = DAY_CODES[d];
+    const weekdaysPhrase = /\bweekdays\b/.test(t) && ['mon', 'tue', 'wed', 'thu', 'fri'].includes(name);
+    const weekendsPhrase = /\bweekends\b/.test(t) && ['sat', 'sun'].includes(name);
+    if (!weekdaysPhrase && !weekendsPhrase && !new RegExp(`\\b${name}`).test(t)) throw new Error(`repeat.weekdays ${d} is not in the cited Family messages.`);
+  }
+  if (rep.until && !isDateGroundedInFamilyManifestEvidence(rep.until, evidence)) throw new Error('repeat.until is not grounded in the cited Family messages.');
+  if (rep.count && !new RegExp(`\\b${rep.count}\\s+(?:times|weeks|sessions|classes|lessons|months|days)\\b`).test(t)) throw new Error('repeat.count is not in the cited Family messages.');
+}
+
+/** RRULE for Google Calendar (UNTIL is the end of that day, UTC). */
+export function familyRepeatRule(value: unknown): string {
+  const rep = parseRepeat(value);
+  const parts = [`FREQ=${rep.frequency.toUpperCase()}`];
+  if (rep.interval && rep.interval > 1) parts.push(`INTERVAL=${rep.interval}`);
+  if (rep.weekdays?.length) parts.push(`BYDAY=${rep.weekdays.join(',')}`);
+  if (rep.until) parts.push(`UNTIL=${rep.until.replace(/-/g, '')}T235959Z`);
+  if (rep.count) parts.push(`COUNT=${rep.count}`);
+  return `RRULE:${parts.join(';')}`;
+}
+
 /** Use one date resolver for Family calendar dates and Family-list due dates. */
 export function isDateGroundedInFamilyManifestEvidence(
   value: string,
@@ -828,10 +898,13 @@ function assertCoherentCreateLineage(
   evidence: AuthorizedFamilyManifestEvidence,
 ): void {
   const title = asRequiredString(input.title, 'title');
+  // A photo the requester attached (role "photo") can supply the details; the
+  // request itself was already checked to come from a person's own words.
+  const detailRole = (binding: FamilyManifestSourceBinding) => binding.sourceRole === 'user' || binding.sourceRole === 'photo';
   const titleBindings = evidence.sourceBindings.filter((binding) =>
-    binding.sourceRole === 'user' && isTextGroundedInBinding(title, binding));
+    detailRole(binding) && isTextGroundedInBinding(title, binding));
   const currentBindings = evidence.sourceBindings.filter((binding) =>
-    binding.sourceRole === 'user' && binding.current);
+    detailRole(binding) && binding.current);
   const groundedInLineage = (
     predicate: (binding: FamilyManifestSourceBinding) => boolean,
   ) => titleBindings.some(predicate) || currentBindings.some(predicate);
@@ -922,16 +995,22 @@ function foreignZoneLabels(): { shortUs: string[]; abbrevs: string[]; names: str
   };
 }
 
-function assertSupportedCalendarLanguage(evidence: AuthorizedFamilyManifestEvidence): void {
+function assertSupportedCalendarLanguage(evidence: AuthorizedFamilyManifestEvidence, opts: { allowRecurrence?: boolean } = {}): void {
   const text = evidenceText(evidence);
-  if (/\b(?:daily|weekly|bi[- ]?weekly|fortnightly|monthly|quarterly|yearly|annually|recurrence|recurring|repeats?|repeating)\b/i.test(text)
+  // Changing a whole series ("all future events", "this series") stays unsupported.
+  if (/\ball\s+(?:future|following|subsequent)\b/i.test(text)
+    || /\b(?:future|following|subsequent)\s+(?:events?|occurrences?|appointments?|meetings?)\b/i.test(text)
+    || /\b(?:this|the|entire)\s+series\b/i.test(text)) {
+    throw new Error('Changing a whole recurring series is not supported yet; nothing was changed.');
+  }
+  if (!opts.allowRecurrence && (/\b(?:daily|weekly|bi[- ]?weekly|fortnightly|monthly|quarterly|yearly|annually|recurrence|recurring|repeats?|repeating)\b/i.test(text)
     || /\b(?:every|each)\s+(?:(?:other|second|third|fourth|\d+(?:st|nd|rd|th)?)\s+)?(?:day|week|month|year|weekday|weekend|morning|afternoon|evening|night|sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)s?\b/i.test(text)
     || /\b(?:on\s+)?(?:weekdays|weekends|sundays|mondays|tuesdays|wednesdays|thursdays|fridays|saturdays)\b/i.test(text)
     || /\b(?:once|twice|three|four|\d+)\s+(?:times?\s+)?(?:a|per)\s+(?:day|week|month|year)\b/i.test(text)
     || /\ball\s+(?:future|following|subsequent)\b/i.test(text)
     || /\b(?:future|following|subsequent)\s+(?:events?|occurrences?|appointments?|meetings?)\b/i.test(text)
-    || /\b(?:this|the|entire)\s+series\b|\bseries\s+of\s+(?:events?|appointments?|meetings?)\b/i.test(text)) {
-    throw new Error('Recurring Family calendar events are not supported yet; no one-time event was created instead.');
+    || /\b(?:this|the|entire)\s+series\b|\bseries\s+of\s+(?:events?|appointments?|meetings?)\b/i.test(text))) {
+    throw new Error('That sounds like a repeating event: create it with "repeat" set from their words (it was not created as a one-time event).');
   }
   const namedIanaZones = [...text.matchAll(/\b[A-Za-z_]+\/[A-Za-z_]+\b/g)]
     .map((match) => match[0].toLowerCase());
@@ -966,7 +1045,11 @@ function assertCalendarPayloadGrounded(
   evidence: AuthorizedFamilyManifestEvidence,
   mode: 'create' | 'update',
 ): void {
-  assertSupportedCalendarLanguage(evidence);
+  assertSupportedCalendarLanguage(evidence, { allowRecurrence: mode === 'create' && input.repeat !== undefined });
+  if (input.repeat !== undefined) {
+    if (mode !== 'create') throw new Error('Repeating can only be set when creating a Family event.');
+    assertRepeatGrounded(input.repeat, evidence);
+  }
   const allDay = input.all_day === true;
   if (Object.prototype.hasOwnProperty.call(input, 'all_day') && typeof input.all_day !== 'boolean') {
     throw new Error('all_day must be a boolean.');
@@ -1541,6 +1624,7 @@ function familyCreatePayloadHash(input: {
   location?: string;
   start: calendar_v3.Schema$EventDateTime;
   end: calendar_v3.Schema$EventDateTime;
+  recurrence?: string[];
 }): string {
   return sha256(JSON.stringify({
     version: 1,
@@ -1550,6 +1634,8 @@ function familyCreatePayloadHash(input: {
     location: input.location ?? null,
     start: input.start,
     end: input.end,
+    // Only present for repeating events, so one-time hashes are unchanged.
+    ...(input.recurrence ? { recurrence: input.recurrence } : {}),
   }));
 }
 
@@ -1716,6 +1802,18 @@ export function createFamilyCalendarTools(
             all_day: { type: 'boolean', description: 'Set true for an all-day event. Defaults to false.' },
             description: { type: 'string', description: 'Optional Family-safe event description.' },
             location: { type: 'string', description: 'Optional event location.' },
+            repeat: {
+              type: 'object',
+              description: 'Only when their words say it repeats ("every Tuesday", "weekly", "every other Monday", "her birthday every year", "until December 12", "for 10 weeks"). Omit for one-time events.',
+              properties: {
+                frequency: { type: 'string', enum: ['daily', 'weekly', 'monthly', 'yearly'] },
+                interval: { type: 'number', description: '2 for "every other"; default 1.' },
+                weekdays: { type: 'array', items: { type: 'string', enum: ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'] } },
+                until: { type: 'string', description: 'Last date, YYYY-MM-DD, if they gave one.' },
+                count: { type: 'number', description: 'Number of times, if they gave one.' },
+              },
+              required: ['frequency'],
+            },
           },
           required: ['title', 'date'],
         },
@@ -1724,7 +1822,7 @@ export function createFamilyCalendarTools(
         requireLiveFamilyContext(context);
         assertOnlyInputKeys(
           input,
-          ['title', 'date', 'start_time', 'end_time', 'end_date', 'all_day', 'description', 'location'],
+          ['title', 'date', 'start_time', 'end_time', 'end_date', 'all_day', 'description', 'location', 'repeat'],
           'family_create_event',
         );
         const evidence = requireCalendarManifestEvidence(
@@ -1738,6 +1836,7 @@ export function createFamilyCalendarTools(
         const description = asOptionalString(input.description, 'description');
         const location = asOptionalString(input.location, 'location');
         const { start, end, allDay } = buildEventTimes(input);
+        const recurrence = input.repeat !== undefined ? [familyRepeatRule(input.repeat)] : undefined;
         const sourceMessageKey = context?.sourceMessageKey?.trim();
         if (!sourceMessageKey || !/^[a-f0-9]{64}$/i.test(sourceMessageKey)) {
           throw new Error('The Family event request is missing its durable iMessage identity; nothing was created.');
@@ -1749,6 +1848,7 @@ export function createFamilyCalendarTools(
           location,
           start,
           end,
+          recurrence,
         });
         const requestedActionKey = familyCreateActionKey({
           calendarId,
@@ -1862,6 +1962,7 @@ export function createFamilyCalendarTools(
               location,
               start,
               end,
+              ...(recurrence ? { recurrence } : {}),
               extendedProperties: {
                 private: {
                   [FAMILY_CALENDAR_ACTION_PROPERTY]: receipt.action_key,

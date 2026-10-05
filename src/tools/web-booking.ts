@@ -8,6 +8,7 @@ import { proposeAction, getAction } from '../db.js';
 import { activeWebTaskRun } from '../web-task.js';
 import { checkActionsEnabled } from '../lib/spend-cap.js';
 import { ownerAskedForBooking } from '../lib/owner-request.js';
+import { linkFamilyRequest } from '../family-requests.js';
 import { browserTools } from './browser.js';
 import {
   prepareWebBooking, startWebBooking, bookingDeps, bookingWindowOpen, paymentRefusal,
@@ -54,6 +55,7 @@ After calling this, tell the owner the returned line (for a proposal, DM the exa
       if (quote && ownerAskedForBooking(quote, context)) {
         const { id, done } = startWebBooking(payload, prepared.summary, group);
         void done;
+        linkFamilyRequest(quote, { type: 'action', id });
         return `Booking now [action #${id}]. Tell the owner in one short line, e.g. "${prepared.summary.split(' ')[0]} On it, booking ${payload.what} at ${payload.where}. I'll text you when it's done."`;
       }
       const id = proposeAction({

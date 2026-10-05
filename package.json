@@ -54,6 +54,8 @@
     "model:fit:dry": "tsx scripts/model-fit.ts --dry",
     "backfill:imessages": "tsx scripts/backfill-imessages.ts",
     "test:family-access": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-family-access.ts",
+    "test:research": "tsx scripts/test-research.ts",
+    "test:family-smarter": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-family-smarter.ts",
     "test:family-durable-inbox": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-family-durable-inbox.ts",
     "test:errands": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-errands.ts",
     "test:send-now": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-send-now.ts",

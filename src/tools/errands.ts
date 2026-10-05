@@ -4,6 +4,7 @@
 // executor in actions.ts; start_errand just stages the proposal.
 
 import { proposalText } from '../lib/proposal-text.js';
+import { linkFamilyRequest } from '../family-requests.js';
 import type { ToolDef, ToolContext } from './index.js';
 import { proposeAction, getAction, getErrand, listErrands } from '../db.js';
 import { ownerAskedForCall } from '../lib/owner-request.js';
@@ -128,6 +129,7 @@ Use start_errand instead when it will take calling around or several tries over 
       });
       if ('error' in prepared) return `Not calling: ${prepared.error}`;
       const id = startCallNow(prepared.payload as unknown as Parameters<typeof startCallNow>[0], null);
+      linkFamilyRequest(String(i.owner_request), { type: 'errand', id });
       const d = dial.slice(-10);
       return `Calling ${i.name} (${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}) now [errand #${id}]. Tell the owner in one short line, e.g. "📞 Calling ${i.name} now, I'll text you what they say."${i.keep_transcript ? '' : ' Not keeping a transcript.'}`;
     },

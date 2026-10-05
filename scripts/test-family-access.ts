@@ -708,6 +708,8 @@ async function main(): Promise<void> {
       'family-web',
       'family-instacart',
       'family-spotify',
+      // Calls/bookings/website jobs via the owner's OK.
+      'family-errands',
     ]);
 
     const forbiddenKeys = [
@@ -759,7 +761,8 @@ async function main(): Promise<void> {
       'remember_family_context',
       'resolve_family_coordination',
     ]);
-    assert.deepEqual(names(toolModule.toolRegistry['family-web']), ['web_search']);
+    // fetch_url: read-only public pages, no cookies. research: read-only web research using Family memory only.
+    assert.deepEqual(names(toolModule.toolRegistry['family-web']), ['fetch_url', 'research', 'web_search']);
 
     const source = readFileSync(join(ROOT, 'src/tools/index.ts'), 'utf8');
     const allowlist = source.match(/const FAMILY_MCP_ALLOWLIST[\s\S]*?\n};/)?.[0] ?? '';
@@ -2389,6 +2392,48 @@ async function main(): Promise<void> {
     );
   });
 
+  test('A flyer photo supplies the event details; the request still comes from their words', async () => {
+    const photo = 'Fall Festival\nSaturday, October 17, 2026\n11am - 3pm\nRoosevelt Park';
+    const ask = 'Add this to the family calendar';
+    const input = { title: 'Fall Festival', date: '2026-10-17', start_time: '11:00', end_time: '15:00', location: 'Roosevelt Park' };
+    const sources = manifestModule.buildFamilyTurnSources({ currentMessage: ask, currentSenderId: 'sam', recentMessages: [], currentPhoto: photo });
+    const manifest = manifestModule.createFamilyTurnManifest({
+      draft: { classification: 'action', actions: [{
+        intent_id: 'flyer_event', tool_name: 'family_create_event', kind: 'new_action', arguments: input,
+        source_bindings: [
+          { source_ref: 'current', quote: ask },
+          { source_ref: 'current_photo', quote: 'Fall Festival' },
+          { source_ref: 'current_photo', quote: 'Saturday, October 17, 2026' },
+          { source_ref: 'current_photo', quote: '11am - 3pm' },
+          { source_ref: 'current_photo', quote: 'Roosevelt Park' },
+        ],
+      }] },
+      turnId: 'flyer-turn', chatId: 'test-family-chat', requesterId: 'sam', sources,
+    });
+    const claimed = manifestModule.claimFamilyManifestAction({ manifest, toolName: 'family_create_event', toolInput: input, currentMessage: ask });
+    if ('error' in claimed) throw new Error(claimed.error);
+    const account = 'alex@example.com';
+    const calendarId = 'family-flyer@group.calendar.google.com';
+    const inserts: Array<Record<string, unknown>> = [];
+    const fakeCalendar = {
+      calendarList: { get: async (args: Record<string, unknown>) => ({ data: args.calendarId === account
+        ? { id: account, primary: true, accessRole: 'owner' }
+        : { id: calendarId, summary: 'Family', primary: false, accessRole: 'owner' } }) },
+      events: {
+        list: async () => ({ data: { items: [] } }),
+        insert: async (args: Record<string, unknown>) => { inserts.push(args); return { data: { id: 'flyer-event' } }; },
+      },
+    };
+    const tools = calendarModule.createFamilyCalendarTools({ getCalendarClient: () => fakeCalendar as never, getCalendarId: () => calendarId, getCalendarAccount: () => account });
+    const result = String(await toolByName(tools, 'family_create_event').handler(input, {
+      ...familyContext, userId: 'sam', turnId: 'flyer-turn', currentMessage: ask, recentMessages: [],
+      familyTurnManifest: manifest, familyManifestAuthorization: claimed.authorization, reverifyFamilyAudience: async () => true,
+    }));
+    assert.match(result, /Created Family event: "Fall Festival"/, result);
+    assert.equal(inserts.length, 1);
+    assert.equal((inserts[0].requestBody as { summary: string }).summary, 'Fall Festival');
+  });
+
   test('Family history preserves the original iMessage time across delayed processing', () => {
     const sourceTime = '2026-09-20T03:59:00.000Z';
     const content = 'Recovered Family timestamp fixture';
@@ -3592,10 +3637,28 @@ async function main(): Promise<void> {
           ordinaryInput,
           grantedFamilyContext('family_create_event', ordinaryInput, message),
         ),
-        /Recurring Family calendar events are not supported/i,
+        /repeating event|recurring series/i,
       );
     }
     assert.equal(inserted.length, 0, 'recurrence language degraded into one calendar event');
+
+    // Repeating events are supported when every part of the rule is in their words.
+    const weekly = { title: 'Swim lesson', date: '2026-09-22', start_time: '07:00', repeat: { frequency: 'weekly', interval: 2, weekdays: ['TU'] } };
+    await create.handler(weekly, grantedFamilyContext('family_create_event', weekly, 'Schedule Swim lesson every other Tuesday at 7am starting September 22, 2026'));
+    assert.deepEqual((inserted.at(-1)?.requestBody as { recurrence?: string[] }).recurrence, ['RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU']);
+    const bday = { title: "Jamie's birthday", date: '2026-11-03', all_day: true, repeat: { frequency: 'yearly' } };
+    await create.handler(bday, grantedFamilyContext('family_create_event', bday, "Add Jamie's birthday on November 3, 2026, all day, every year"));
+    assert.deepEqual((inserted.at(-1)?.requestBody as { recurrence?: string[] }).recurrence, ['RRULE:FREQ=YEARLY']);
+    const before = inserted.length;
+    // A rule part they didn't say is refused: weekly when they said monthly; Thursday when they said Tuesday.
+    const wrongFreq = { title: 'Swim lesson', date: '2026-09-22', start_time: '07:00', repeat: { frequency: 'weekly' } };
+    await expectError(() => create.handler(wrongFreq, grantedFamilyContext('family_create_event', wrongFreq, 'Schedule Swim lesson monthly at 7am starting September 22, 2026')), /frequency "weekly" is not in the cited/);
+    const wrongDay = { title: 'Swim lesson', date: '2026-09-22', start_time: '07:00', repeat: { frequency: 'weekly', weekdays: ['TH'] } };
+    await expectError(() => create.handler(wrongDay, grantedFamilyContext('family_create_event', wrongDay, 'Schedule Swim lesson every Tuesday at 7am starting September 22, 2026')), /weekdays TH is not in the cited/);
+    const noRepeatWords = { title: 'Swim lesson', date: '2026-09-22', start_time: '07:00', repeat: { frequency: 'weekly' } };
+    await expectError(() => create.handler(noRepeatWords, grantedFamilyContext('family_create_event', noRepeatWords, 'Schedule Swim lesson on September 22, 2026 at 7am')), /is not in the cited/);
+    assert.equal(inserted.length, before, 'an ungrounded repeat rule reached Calendar');
+    inserted.length = 0; // the checks below count from zero
 
     const nonEasternZones = [
       'PT', 'PST', 'PDT', 'Pacific Time',

@@ -74,6 +74,9 @@ export const FAMILY_TOOL_POLICIES: Readonly<Record<string, FamilyToolPolicy>> = 
   recall_family_context: 'family-read',
   list_family_context: 'family-read',
   web_search: 'family-read',
+  fetch_url: 'family-read',
+  research: 'family-read',
+  ask_owner: 'low-risk-write',
   mcp_instacart_create_recipe: 'low-risk-write',
   mcp_instacart_create_shopping_list: 'low-risk-write',
   mcp_spotify_search: 'family-read',
@@ -249,6 +252,8 @@ export function buildFamilyTurnSources(input: {
   currentSenderId: string;
   recentMessages: ReadonlyArray<MessageRow>;
   currentCreatedAt?: string;
+  /** Transcript of a photo attached to the current message (role "photo"). */
+  currentPhoto?: string;
   nowMs?: number;
 }): FamilyTurnSource[] {
   const nowMs = input.nowMs ?? Date.now();
@@ -280,6 +285,18 @@ export function buildFamilyTurnSources(input: {
         : new Date(nowMs).toISOString(),
       current: true,
     },
+    // A photo's text can supply an event's or item's details, but it is never
+    // anyone's request: only role "user" text authorizes (see hasCurrentBinding).
+    ...(input.currentPhoto ? [{
+      ref: 'current_photo',
+      role: 'photo',
+      senderId: input.currentSenderId,
+      content: input.currentPhoto,
+      createdAt: input.currentCreatedAt && Number.isFinite(Date.parse(input.currentCreatedAt))
+        ? new Date(input.currentCreatedAt).toISOString()
+        : new Date(nowMs).toISOString(),
+      current: true,
+    }] : []),
   ];
 }
 
@@ -391,11 +408,21 @@ function isActionInitiatingBinding(
 ): boolean {
   if (isDirectWriteRequest(clause)) return true;
   if (toolName === 'add_family_item') {
-    return HOUSEHOLD_LIST_INPUT.test(clause) || NAMED_LIST_SHORTHAND_INPUT.test(clause);
+    return HOUSEHOLD_LIST_INPUT.test(clause) || NAMED_LIST_SHORTHAND_INPUT.test(clause) || isMistypedListAdd(clause);
   }
   if (toolName === 'complete_family_item') return COMPLETION_STATUS_INPUT.test(clause);
   if (toolName === 'family_create_event') return isTelegraphicCalendarInput(clause);
   return false;
+}
+
+// A mistyped "add" ("Did peanut butter to the list", "As pumpkin spice to the
+// list") reads as an add to any person: "<x> to the list" with no other verb
+// isn't a sentence otherwise. Questions ("Did peanut butter get added to the
+// list?") and anything with a real second verb stay out.
+const MISTYPED_ADD = /^(?:please\s+)?(?:did|ad|sdd|adf|addd|aad|asd|as|ads)\s+(?!.*\b(?:get|got|gets|added|already|ever|go|went|make|made|end|ended|still)\b)(.+?)\s+(?:to|on|onto)\s+(?:the\s+|our\s+|my\s+)?(?:[a-z]+\s+)?list\b[\s.!]*$/i;
+function isMistypedListAdd(clause: string): boolean {
+  const c = clause.trim();
+  return !c.includes('?') && MISTYPED_ADD.test(c);
 }
 
 function isContinuationOrCorrectionBinding(clause: string): boolean {
@@ -658,7 +685,7 @@ export function createFamilyTurnManifest(input: {
       if (!quote || !source.content.includes(quote)) {
         throw new Error(`Family intent ${intentId} must quote an exact non-empty span from ${sourceRef}.`);
       }
-      if (source.current) hasCurrentBinding = true;
+      if (source.current && source.role === 'user') hasCurrentBinding = true;
       else {
         hasEarlierBinding = true;
         if (source.role === 'user') hasEarlierUserBinding = true;
@@ -722,7 +749,14 @@ export function createFamilyTurnManifest(input: {
           !binding.current && isActionInitiatingBinding(toolName, binding.clause));
         const currentContinues = boundClauses.some((binding) =>
           binding.current && isContinuationOrCorrectionBinding(binding.clause));
-        if (!earlierInitiated || !currentContinues) {
+        // "Add it to the active list": the current message is itself a direct
+        // request that only points back ("it", "that", "those") for the item,
+        // which comes from an earlier member message in the 30-minute window.
+        const currentInitiatesWithReference = kind === 'continuation' && boundClauses.some((binding) =>
+          binding.current
+          && isActionInitiatingBinding(toolName, binding.clause)
+          && /\b(?:it|that|this|them|those|these)\b/i.test(binding.clause));
+        if ((!earlierInitiated || !currentContinues) && !currentInitiatesWithReference) {
           throw new Error(`Family intent ${intentId} cites unsafe or non-direct action language.`);
         }
       } else {

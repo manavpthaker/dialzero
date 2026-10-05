@@ -6,6 +6,7 @@
 import type { ToolContext } from '../tools/index.js';
 import { getRecentMessagesWithMetadata } from '../db.js';
 import { getOwner } from '../config.js';
+import { approvedFamilyWords } from '../family-requests.js';
 
 const WINDOW_MS = 30 * 60_000;
 const CALL_WORDS = /\b(call|calling|ring|phone|dial|voicemail|leave (a |them a )?(message|vm))\b/i;
@@ -27,7 +28,9 @@ export function ownerAsked(quote: string, context: ToolContext | undefined, word
   for (const m of getRecentMessagesWithMetadata(context.groupKey || 'admin', 20)) {
     if (m.role === 'user' && new Date(`${m.created_at.replace(' ', 'T')}Z`).getTime() >= cutoff) texts.push(m.content);
   }
-  return texts.some((t) => norm(t).includes(q));
+  if (texts.some((t) => norm(t).includes(q))) return true;
+  // A Family-chat request the owner approved in the last 30 minutes (src/family-requests.ts).
+  return approvedFamilyWords(quote) !== null;
 }
 
 /** The owner's own words asking for a phone call. */
@@ -35,7 +38,7 @@ export function ownerAskedForCall(quote: string, context?: ToolContext): boolean
   return ownerAsked(quote, context, CALL_WORDS);
 }
 
-const WEB_TASK_WORDS = /\b(cancel|unsubscribe|export|download|close|turn off|opt out|return|refund|change|update|switch|renew|sign up|sign (me|us) up|pause|delete|remove|log ?in|online|website|site|account|settings)\b/i;
+const WEB_TASK_WORDS = /\b(instacart|cart|groceries|grocery|cancel|unsubscribe|export|download|close|turn off|opt out|return|refund|change|update|switch|renew|sign up|sign (me|us) up|pause|delete|remove|log ?in|online|website|site|account|settings)\b/i;
 
 /** The owner's own words asking for something done on a website (cancel, export, change a setting...). */
 export function ownerAskedForWebTask(quote: string, context?: ToolContext): boolean {

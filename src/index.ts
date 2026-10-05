@@ -21,6 +21,7 @@ import { startErrands } from './errands.js';
 import { startWakeUpCalls } from './wakeup.js';
 import { startWebTaskRunner } from './web-task.js';
 import { startFollowups } from './followups.js';
+import { startFamilyRequests } from './family-requests.js';
 import { startOmiSync } from './omi-sync.js';
 import { recordRunningSha } from './lib/running-sha.js';
 import { startChromeHealth } from './lib/chrome-health.js';
@@ -31,6 +32,7 @@ import { startFamilyRuntimeScheduler } from './family-runtime.js';
 import { verifySharedAudience } from './family-membership.js';
 import { startEmailReconciliationRuntime } from './email-reconciliation.js';
 import { isOwnedOn, moduleFor, resolveModules } from './modules.js';
+import { getOwner } from './config.js';
 
 // Fixed receipt ack fired the instant a message lands, so the user knows it was
 // received while the agent works. Deliberately NOT per-message generated — the
@@ -93,6 +95,8 @@ async function main() {
     ['chrome-health', startChromeHealth],
     // Follow-ups after "done" and email threads with companies, until settled.
     ['followups', startFollowups],
+    // Calls/jobs the owner approved for the Family chat: post results back there.
+    ['family-requests', startFamilyRequests],
   ];
   for (const [key, start] of services) {
     if (!isOwnedOn('start', key)) continue;
@@ -207,7 +211,7 @@ async function main() {
         })
         .catch(async (err) => {
           const errMsg = isFamily
-            ? 'I could not process that Family request.'
+            ? familyErrorText(err)
             : `Task failed: ${err instanceof Error ? err.message : String(err)}`;
           failAsyncTask(taskId, errMsg);
           await sendIfAudienceStillApproved(remoteJid, group, errMsg);
@@ -231,7 +235,7 @@ async function main() {
         }
       } catch (err) {
         const errMsg = isFamily
-          ? 'I could not process that Family request.'
+          ? familyErrorText(err)
           : `Error: ${err instanceof Error ? err.message : String(err)}`;
         await sendIfAudienceStillApproved(remoteJid, group, errMsg);
       }
@@ -299,3 +303,17 @@ main().catch((err) => {
   console.error('[assistant] Fatal:', err);
   process.exit(1);
 });
+
+/**
+ * What the Family chat sees when a request fails: the kind of problem in plain
+ * words, never a raw stack or internal detail (the chat is shared).
+ */
+function familyErrorText(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const owner = getOwner().name.split(' ')[0] || 'the owner';
+  if (/timed? ?out|ETIMEDOUT|aborted|deadline/i.test(msg)) return 'That took too long on my end. Try it again in a minute.';
+  if (/budget|rate limit|429|quota/i.test(msg)) return `I'm out of capacity for a bit. Try again in a few minutes, or ask ${owner}.`;
+  if (/calendar|google/i.test(msg)) return "The Family calendar didn't answer just now. Try again in a minute.";
+  if (/ECONN|network|fetch failed|ENOTFOUND|socket/i.test(msg)) return 'I lost my connection for a second. Try it again.';
+  return `Something broke on my end, so nothing was changed. Try it again; if it keeps happening, tell ${owner}.`;
+}

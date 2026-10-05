@@ -18,6 +18,8 @@ import { actionTools } from './actions.js';
 import { errandTools } from './errands.js';
 import { sendNowTools } from './send-now.js';
 import { webBookingTools, bookingBrowserTools } from './web-booking.js';
+import { instacartCartTools } from './instacart-cart.js';
+import { researchTools } from './research.js';
 import { webTaskTools, checkDownloadsTool, enterOwnerCodeTool, openSignInLinkTool, desktopTool, fillLoginTool, fill2faTool } from './web-task.js';
 import { jobTools } from './jobs.js';
 import { followupTools } from './followups.js';
@@ -27,6 +29,7 @@ import { notionTools } from './notion.js';
 import { familyCalendarTools } from './family-calendar.js';
 import { familyListTools } from './family-lists.js';
 import { familyMemoryTools } from './family-memory.js';
+import { familyErrandTools, familyRequestOwnerTools } from './family-errands.js';
 import { emailReconciliationTools } from './email-reconciliation.js';
 import { startMcpServers } from '../mcp-manager.js';
 import { getProfileConfig } from '../config.js';
@@ -83,7 +86,7 @@ export interface ToolDef {
 export const toolRegistry: Record<string, ToolDef[]> = {
   calendar: calendarTools,
   github: githubTools,
-  web: webTools,
+  web: [...webTools, ...researchTools],
   linkedin: linkedinTools,
   codex: codexTools,
   household: householdTools,
@@ -97,9 +100,9 @@ export const toolRegistry: Record<string, ToolDef[]> = {
   messages: messagesTools,
   recall: recallTools,
   // Split by feature module (src/modules.ts) so each can be switched off alone.
-  actions: [...actionTools, ...sendNowTools, ...jobTools, ...followupTools],
+  actions: [...actionTools, ...sendNowTools, ...jobTools, ...followupTools, ...familyRequestOwnerTools],
   errands: [...errandTools, ...wakeUpTools],
-  'web-booking': [...webBookingTools, ...webTaskTools],
+  'web-booking': [...webBookingTools, ...webTaskTools, ...instacartCartTools],
   // Only the booking sub-agent (web-booking.ts BOOKING_GROUP) gets these.
   // Booking and website-job runs: the scoped browser tools, plus proof that a
   // download landed and a web search for "how do I export/cancel on X".
@@ -115,8 +118,12 @@ export const toolRegistry: Record<string, ToolDef[]> = {
   'family-lists': familyListTools,
   'family-memory': familyMemoryTools,
   'email-reconciliation': emailReconciliationTools,
+  // Calls / bookings / website jobs for the family: the owner's OK first (src/family-requests.ts).
+  'family-errands': createFamilyContextBoundTools(familyErrandTools),
+  // Read-only public web: search, and open a result page (fetch_url refuses
+  // private/loopback hosts and sends no cookies or logins).
   'family-web': createFamilyContextBoundTools(
-    webTools.filter((tool) => tool.definition.name === 'web_search'),
+    [...webTools.filter((tool) => tool.definition.name === 'web_search' || tool.definition.name === 'fetch_url'), ...researchTools],
   ),
 };
 

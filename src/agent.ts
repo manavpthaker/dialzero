@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { captionPhoto } from './lib/photo-caption.js';
+import { captionPhoto, transcribePhotoForFamily } from './lib/photo-caption.js';
 import { budgetStopResponse, isLlmBudgetError } from './lib/token-budget.js';
 import type { GroupConfig } from './group-resolver.js';
 import type { User } from './user-resolver.js';
@@ -606,12 +606,21 @@ export async function runAgent(
   // message IDs. `current` is deliberately turn-local. Sender identity remains
   // separate from the raw message body, so the owner and partner can continue one
   // shared pending request without the model mistaking who said what.
+  // A Family photo is transcribed before the turn so its details can be used
+  // now and remembered for a follow-up ("add the second one too").
+  const familyPhoto = groupConfig.key === 'family' && image && !systemAuthored
+    ? await Promise.race([
+      transcribePhotoForFamily(image),
+      new Promise<null>((r) => setTimeout(() => r(null), 20_000)),
+    ])
+    : null;
   const familySources = groupConfig.key === 'family'
     ? buildFamilyTurnSources({
       currentMessage: userMessage,
       currentSenderId: user.id,
       recentMessages: familyHistory,
       currentCreatedAt: sourceMessage?.timestamp,
+      currentPhoto: familyPhoto ?? undefined,
     })
     : [];
   let familyTurnManifest: FamilyTurnManifest | undefined;
@@ -691,6 +700,9 @@ export async function runAgent(
           ? [{ type: 'input_text', text: currentFamilyMetadata(user.id) }]
           : []),
         { type: 'input_text', text: userMessage },
+        ...(familyPhoto
+          ? [{ type: 'input_text', text: `<family_photo source_ref="current_photo" role="photo">\n${familyPhoto}\n</family_photo>` }]
+          : []),
       ],
     });
   }
@@ -711,6 +723,9 @@ export async function runAgent(
     if (image && groupConfig.key !== 'family') {
       void captionPhoto(image).then((c) => { if (c) appendToMessage(savedId, `\n[Photo: ${c}]`); });
     }
+    // Family: the photo's text is its own row (role "photo"), never mixed into
+    // the sender's words, so it can supply details but never authorize a change.
+    if (familyPhoto) saveMessage(groupConfig.key, user.id, 'photo', `Text of the photo ${user.name} sent:\n${familyPhoto}`, sourceMessage?.timestamp);
   }
 
   // Get scoped tools for this group

@@ -3,6 +3,7 @@
 // Logic: src/web-task.ts. The sub-agent reuses the booking-browser tools.
 
 import { proposalText } from '../lib/proposal-text.js';
+import { linkFamilyRequest } from '../family-requests.js';
 import { readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import type { ToolDef, ToolContext } from './index.js';
@@ -60,6 +61,7 @@ After calling this, tell the owner the returned line in one short sentence (for 
       if (quote && ownerAskedForWebTask(quote, context)) {
         const { id, done } = startWebTask(payload, prepared.summary, group);
         void done;
+        linkFamilyRequest(quote, { type: 'action', id });
         return `Started [action #${id}]. Tell the owner in one short line, e.g. "🌐 On it in Chrome. I'll text you when it's done."`;
       }
       const id = proposeAction({

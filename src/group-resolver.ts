@@ -70,7 +70,7 @@ export function initGroups() {
       config: {
         key: 'family',
         name: 'Family',
-        tools: ['family-calendar', 'family-lists', 'family-memory', 'family-web', 'family-instacart', 'family-spotify'],
+        tools: ['family-calendar', 'family-lists', 'family-memory', 'family-web', 'family-instacart', 'family-spotify', 'family-errands'],
         contextPath: 'context/family',
         audience: 'shared',
         replyPolicy: 'smart',

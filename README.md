@@ -29,10 +29,12 @@ It's not an app you open. It's a contact in your phone.
 | "Hey Siri, ask Milo what's next" (whatever you named it) | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
 | "What are you working on?" | One short list: what's waiting on you, what it's doing, and what it's keeping an eye on. Say "stop" about any of it. |
 | "Make sure they refund me" | Keeps checking your email (and follows up on its own after a cancellation) and only texts you if something's wrong. |
+| "What can we do with the kids Saturday morning?" | Researches it properly: real options for your dates, with hours, drive time, cost, why each fits your family, and a best plan. Remembers what you liked and didn't. |
+| "Put the grocery list on Instacart" | Fills your Instacart cart in Chrome from the shared grocery list and stops before checkout. |
 | A voice memo | Transcribes it and files away what matters. |
 | "What did I tell Alex at lunch?" | If you use [Omi](https://omi.me) to record your conversations, it looks it up, and quietly keeps the promises, to-dos and people from each one (optional). |
 
-Plus a shared **family chat**: add it to a group text with your partner and it keeps a shared calendar and grocery list.
+Plus a shared **family chat**: add it to a group text with your partner and it keeps a shared calendar (including repeating events and flyers from a photo) and grocery list, researches plans, and can ask you to OK a call, booking or website job they need done.
 
 Every feature is optional. You pick what you want during setup.
 
