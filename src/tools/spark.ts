@@ -1,14 +1,13 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { ToolDef } from './index.js';
-import { upsertPerson, addInteraction } from '../db.js';
+import { upsertPerson, findPersonByEmail, isPlaceholderPersonName } from '../db.js';
 
 const exec = promisify(execFile);
 const SPARK_BIN = process.env.SPARK_BIN || '/usr/local/bin/spark';
 
-// "Name <email@domain>" form OR bare "email@domain".
-// Captures the optional preceding name (up to 4 capitalized words) and the address.
-const SENDER_RE = /(?:([A-Z][\w'.-]+(?:\s+[A-Z][\w'.-]+){0,3})\s+)?<?\b([\w.+-]+@[\w.-]+\.[a-z]{2,})\b>?/gi;
+// "First Last <email@domain>": a real display name right before the address.
+const NAMED_SENDER_RE = /"?([A-Z][\w'.-]+(?:\s+[A-Z][\w'.-]+){1,3})"?\s*<([\w.+-]+@[\w.-]+\.[a-z]{2,})>/g;
 
 // Filter out clearly-automated addresses so the people graph stays human-scale.
 export function isLikelyAutomated(email: string): boolean {
@@ -19,29 +18,24 @@ export function isLikelyAutomated(email: string): boolean {
   return false;
 }
 
-// Side effect: pull "Name <email>" pairs out of free-text Spark output and upsert.
-// Always wrapped in try/catch so people-graph writes can never break the email tool.
-function ingestSendersFromText(text: string, channel: string, ref?: string): void {
+// Side effect: when Spark output shows "First Last <email>" for someone already in the
+// people graph under a stand-in name (their email), give them the real name.
+// Reading email never creates people or logs interactions: that fills the graph with
+// nameless inbox addresses and blank "email" interactions that crowd real texts and
+// calls out of People Context. Contacts, calendar, iMessage and calls create people;
+// reading mail only improves names. Never lets a graph write break an email read.
+function ingestSendersFromText(text: string): void {
   try {
     const seen = new Set<string>();
     let m: RegExpExecArray | null;
-    SENDER_RE.lastIndex = 0;
-    while ((m = SENDER_RE.exec(text)) !== null) {
-      const rawName = m[1]?.trim();
+    NAMED_SENDER_RE.lastIndex = 0;
+    while ((m = NAMED_SENDER_RE.exec(text)) !== null) {
+      const name = m[1].trim();
       const email = m[2].toLowerCase();
       if (seen.has(email)) continue;
       seen.add(email);
-      if (isLikelyAutomated(email)) continue;
-      const personId = upsertPerson({
-        name: rawName || email,
-        emails: [email],
-      });
-      addInteraction({
-        person_id: personId,
-        channel,
-        ref,
-        occurred_at: new Date().toISOString(),
-      });
+      const person = findPersonByEmail(email);
+      if (person && isPlaceholderPersonName(person.name)) upsertPerson({ emails: [email], name });
     }
   } catch { /* never let graph writes break email reads */ }
 }
@@ -99,7 +93,7 @@ export const sparkTools: ToolDef[] = [
       if (page) args.push('--page', String(page));
       if (new_senders) args.push('--new-senders');
       const output = await spark(args);
-      ingestSendersFromText(output, 'email');
+      ingestSendersFromText(output);
       return output;
     },
   },
@@ -123,7 +117,7 @@ export const sparkTools: ToolDef[] = [
       if (filter) args.push('--filter', filter);
       if (in_scope) args.push('--in', in_scope);
       const output = await spark(args);
-      ingestSendersFromText(output, 'email');
+      ingestSendersFromText(output);
       return output;
     },
   },
@@ -146,7 +140,7 @@ export const sparkTools: ToolDef[] = [
       if (download_attachments) args.push('--download-attachments');
       args.push(message_id);
       const output = await spark(args);
-      ingestSendersFromText(output, 'email', message_id);
+      ingestSendersFromText(output);
       return output;
     },
   },

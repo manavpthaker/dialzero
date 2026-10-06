@@ -54,6 +54,7 @@
     "model:fit:dry": "tsx scripts/model-fit.ts --dry",
     "backfill:imessages": "tsx scripts/backfill-imessages.ts",
     "test:family-access": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-family-access.ts",
+    "test:threads": "tsx scripts/test-threads.ts",
     "test:research": "tsx scripts/test-research.ts",
     "test:family-smarter": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-family-smarter.ts",
     "test:family-durable-inbox": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-family-durable-inbox.ts",
@@ -69,7 +70,8 @@
     "test:followups": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-followups.ts",
     "test:calendar-alerts": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-calendar-alerts.ts",
     "test:chrome-health": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-chrome-health.ts",
-    "test:omi": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-omi.ts"
+    "test:omi": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-omi.ts",
+    "test:job-updates": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-job-updates.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

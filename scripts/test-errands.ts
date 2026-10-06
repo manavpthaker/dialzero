@@ -407,6 +407,37 @@ try {
     assert.match(told.filter((x) => x.id === id)[0].text, /Your move: OK at \$95\?/);
   });
 
+  await check('call notes: who said what is saved, texted, and briefed into the next call', async () => {
+    const id = activate({ ...base, targets: [{ name: 'Riverside Recreation', phone: '312-555-4781' }] });
+    const row = db.getErrand(id)!;
+    db.updateErrand(id, { call_state: 'connected' });
+    const before = told.length;
+    await errands.applyCallResult(id, {
+      status: 'done', outcome: 'Registration for the Halloween Bash is online only.', followUp: '', transcriptTail: '',
+      notes: { spokeWith: 'Pat, front desk', said: 'register online; walk-ins not accepted', reference: 'HB-2231', promised: 'email the link today' },
+    });
+    assert.match(told[before].text, /Spoke with Pat, front desk; ref HB-2231/);
+    const notes = db.callNotesFor({ phone: '3125554781' });
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].business, 'Riverside Recreation');
+    const prior = errands.priorCallNotes({ name: 'Riverside Recreation', phone: '+13125554781' });
+    assert.match(prior[0], /spoke with Pat, front desk\. they said: register online.*reference HB-2231.*they said they'd email the link today/);
+    const facts = db.factsAbout('Riverside Recreation');
+    assert.ok(facts.some((f: { predicate: string; object: string }) => f.predicate === 'call note' && /Pat/.test(f.object)));
+    // The next errand to the same number starts with what Pat said.
+    const next = activate({ ...base, targets: [{ name: 'Riverside Recreation', phone: '(312) 555-4781' }] });
+    const match = errands.findErrandForCallback('3125554781');
+    assert.ok(match);
+    void row; void next;
+  });
+
+  await check('a call that never reached anyone leaves no note', async () => {
+    const id = activate({ ...base, targets: [{ name: 'Quiet Shop', phone: '312-555-7000' }] });
+    db.updateErrand(id, { call_state: 'connected' });
+    await errands.applyCallResult(id, { status: 'retry_later', outcome: 'Connected, but no one engaged (likely a phone menu, hold music, or silence).', followUp: '', transcriptTail: '' });
+    assert.equal(db.callNotesFor({ phone: '3125557000' }).length, 0);
+  });
+
   console.log(`\nErrand tests passed: ${passed} checks.`);
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

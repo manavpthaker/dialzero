@@ -50,6 +50,11 @@ export function startOfTodayLocal(): Date {
   return new Date(`${localYmd(now)}T00:00:00${localOffset(now)}`);
 }
 
+/** UTC instant a local calendar day (YYYY-MM-DD) starts, DST-aware. */
+export function localDayStartUtc(day: string): Date {
+  return new Date(`${day}T00:00:00${localOffset(new Date(`${day}T12:00:00Z`))}`);
+}
+
 /** UTC instant of 00:00 local on the most recent Sunday (weeks start Sunday). */
 export function startOfWeekLocal(): Date {
   const now = new Date();

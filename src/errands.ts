@@ -26,7 +26,9 @@ import {
   toDialable, isFictionalNumber, placeErrandCall, setErrandCallHooks, setOneOffCallStarter, isPhoneConfigured,
   type CallResult, type CallBooking, type CallbackMatch,
 } from './phone.js';
-import { sendInterrupt, stageAmbient } from './cos-outbound.js';
+import { sendInterrupt } from './cos-outbound.js';
+import { updateOwner, fmtWhen, dueForCheckIn } from './lib/job-updates.js';
+import { setErrandLine } from './jobs.js';
 import { createCalendarEventRaw } from './tools/calendar.js';
 import { normalizePhone } from './lib/phone.js';
 import { todayET } from './lib/time-et.js';
@@ -34,8 +36,10 @@ import { localOffset } from './lib/time.js';
 import { getBotName, getOwner, getTimezone } from './config.js';
 import {
   createErrand, getErrand, updateErrand, getDueErrands, getErrandsInCall, getErrandsForCallback, addErrandEvent,
-  getErrandEvents, countErrandCallsToday, proposeAction, confirmAction, markActionExecuting,
-  markActionDone, markActionFailed, findPersonByPhone, type Action, type ErrandRow,
+  getErrandEvents,
+  listErrands, countErrandCallsToday, proposeAction, confirmAction, markActionExecuting,
+  markActionDone, markActionFailed, findPersonByPhone, addCallNote, callNotesFor, saveFact,
+  type Action, type ErrandRow, type CallNoteRow,
 } from './db.js';
 
 const env = (k: string, d = '') => (process.env[k] ?? d).trim();
@@ -188,6 +192,12 @@ function etParts(at: Date): { dow: number; hour: number; minute: number } {
   return { dow: dows[parts.weekday] ?? 1, hour: Number(parts.hour) % 24, minute: Number(parts.minute) };
 }
 
+/** "Mon–Sat 9–6", from the configured calling hours. */
+function callingHoursText(): string {
+  const h = (n: number) => String(n % 12 || 12);
+  return `Mon–Sat ${h(num('ERRAND_CALL_START', 9))}–${h(num('ERRAND_CALL_END', 18))}`;
+}
+
 export function inCallingHours(at = new Date()): boolean {
   const start = num('ERRAND_CALL_START', 9);
   const end = num('ERRAND_CALL_END', 18);
@@ -249,21 +259,38 @@ async function tellOwner(row: ErrandRow, kind: NotifyKind, text: string): Promis
   const who = env.targets[Math.min(row.target_idx, env.targets.length - 1)]?.name;
   const body = env.reply_mode
     ? `📞 ${who}: ${text}`
-    : `${headline} Errand #${row.id} (${env.goal}): ${text}`;
-  try {
-    if (env.reply_mode) {
-      // The owner asked for this call and is waiting on the answer.
-      await sendInterrupt({ source: 'errands', subject, kind: 'reply', text: body });
-    } else if (deadlineSoon(env)) {
-      await sendInterrupt({ source: 'errands', subject, kind: 'time-critical', text: body });
-    } else if (kind === 'blocked') {
-      await sendInterrupt({ source: 'errands', subject, kind: 'decision', text: body });
-    } else {
-      stageAmbient('errands', body, { subject, detail: body });
-    }
-  } catch (err) {
-    console.error(`[errands] could not notify about #${row.id}:`, err);
-  }
+    : `${headline} ${shortGoal(env.goal)}: ${text}`;
+  // The owner approved this errand and is waiting on it: results go to them
+  // directly, not into the next check-in.
+  await updateOwner(subject, body, { milestone: true, source: 'errands' });
+}
+
+function shortGoal(goal: string): string {
+  const g = goal.replace(/\s+/g, ' ').trim();
+  return g.length > 70 ? `${g.slice(0, 67).replace(/\s+\S*$/, '')}…` : g;
+}
+
+/** One progress line between calls. Milestones: moved to the next place, or pushed to another day. */
+async function progressUpdate(row: ErrandRow, line: string, milestone: boolean): Promise<void> {
+  if (notifyOverride) return;
+  await updateOwner(`errand:${row.id}`, `📞 ${shortGoal(envelopeOf(row).goal)}: ${line}`, { milestone, source: 'errands' });
+}
+
+/** " (Spoke with Pat, front desk; ref 4471.)" for the owner's texts. */
+function whoSaid(result: CallResult): string {
+  const n = result.notes;
+  if (!n?.spokeWith && !n?.reference) return '';
+  const bits = [n.spokeWith && !/automated|voicemail/i.test(n.spokeWith) ? `Spoke with ${n.spokeWith}` : '', n.reference ? `ref ${n.reference}` : ''].filter(Boolean);
+  return bits.length ? ` (${bits.join('; ')}.)` : '';
+}
+
+/** Plain words for what a call ran into. */
+function plainResult(result: CallResult): string {
+  const menu = result.menuLog?.length ? ` (phone menu: ${result.menuLog.join('; ').replace(/Pressed (\d) \(([^)]*)\)/g, 'pressed $1 for $2')})` : '';
+  if (result.status === 'voicemail') return `went to voicemail${result.botSaid ? ', left a message' : ''}`;
+  if (result.endedWithoutOutcome || /without a recorded outcome/i.test(result.outcome)) return `the call dropped before I reached anyone${menu}`;
+  const o = result.outcome.replace(/\s+/g, ' ').trim();
+  return `${o.length > 160 ? `${o.slice(0, 157)}…` : o}${menu}`;
 }
 
 // ── Bookings → calendar ─────────────────────────────────────────────────────
@@ -335,8 +362,9 @@ function finish(row: ErrandRow, status: 'done' | 'failed', outcome: string): voi
 export function whatHappened(id: number): string {
   const results = getErrandEvents(id, 30).filter((e) => e.type === 'call_result').reverse();
   if (!results.length) return "couldn't get through.";
-  const lines = results.map((e) => String(e.detail ?? '').replace(/^[^:]+:\s*/, ''));
-  const menus = lines.map((l) => l.match(/Menu: (.*)$/)?.[1]).filter(Boolean) as string[];
+  const details = results.map((e) => String(e.detail ?? ''));
+  const lines = details.map((d) => d.split('\n')[0].replace(/\s*Menu:.*$/, '').replace(/^[^:]+:\s*/, ''));
+  const menus = details.map((d) => d.match(/Menu: ([^\n]*)/)?.[1]).filter(Boolean) as string[];
   const kinds = lines.map((l) => (/no one engaged|hold music|silence/i.test(l) ? 'menu' : /voicemail/i.test(l) ? 'voicemail' : /no answer/i.test(l) ? 'no answer' : 'other'));
   const n = results.length;
   let what: string;
@@ -346,7 +374,9 @@ export function whatHappened(id: number): string {
   } else if (kinds.every((k) => k === 'no answer')) {
     what = `no one picked up (${n} call${n === 1 ? '' : 's'}).`;
   } else {
-    what = `${n} call${n === 1 ? '' : 's'}; last one: ${lines.at(-1)!.replace(/\s*Menu:.*$/, '').replace(/^(retry_later|voicemail|blocked|failed)\s*[—-]\s*/, '')}`;
+    const last = lines.at(-1)!.replace(/^(retry_later|voicemail|blocked|failed)\s*[—-]\s*/, '');
+    const dropped = /without a recorded outcome/i.test(last) ? `the call dropped before I reached anyone${menus.at(-1) ? ` (phone menu: ${menus.at(-1)!.replace(/Pressed (\d) \(([^)]*)\)/g, 'pressed $1 for $2')})` : ''}.` : last;
+    what = `${n} call${n === 1 ? '' : 's'}; last one: ${dropped}`;
   }
   return what;
 }
@@ -356,12 +386,64 @@ function block(row: ErrandRow, reason: string): void {
   addErrandEvent(row.id, 'blocked', reason);
 }
 
+// ── Call notes: who we spoke with and what they said ────────────────────────
+
+function noteDay(at: string): string {
+  return new Date(`${at.replace(' ', 'T')}Z`).toLocaleDateString('en-US', { timeZone: getTimezone(), weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+/** "Mon, Oct 5: spoke with Pat (front desk). They said … Ref 4471. They'll …" */
+export function noteLine(n: CallNoteRow): string {
+  const parts = [
+    n.direction === 'callback' ? 'they called us back' : '',
+    n.spoke_with ? `spoke with ${n.spoke_with}` : '',
+    n.said ? `they said: ${n.said}` : n.summary,
+    n.reference ? `reference ${n.reference}` : '',
+    n.direct_line ? `direct line: ${n.direct_line}` : '',
+    n.promised ? `they said they'd ${n.promised.replace(/^(they('ll| will)|will)\s+/i, '')}` : '',
+  ].filter(Boolean);
+  return `${noteDay(n.at)}: ${parts.join('. ')}`.replace(/\.\./g, '.');
+}
+
+/** Save what a call learned, for the next call to this place and for "who did we talk to". */
+export function recordCallNote(row: ErrandRow, target: ErrandTarget, result: CallResult, direction: 'out' | 'callback' = 'out'): void {
+  const n = result.notes;
+  const engaged = !/no one engaged/i.test(result.outcome) || !!result.menuLog?.length;
+  if (!n && !engaged) return;
+  const menu = result.menuLog?.length ? `Phone menu: ${result.menuLog.join('; ')}.` : '';
+  try {
+    const id = addCallNote({
+      phone: target.phone, business: target.name, errand_id: row.id, direction, status: result.status,
+      spoke_with: n?.spokeWith ?? null,
+      said: [n?.said, menu].filter(Boolean).join(' ') || null,
+      reference: n?.reference ?? null, direct_line: n?.directLine ?? null, promised: n?.promised ?? null,
+      summary: result.outcome,
+    });
+    const saved = callNotesFor({ phone: target.phone }, 1).find((x) => x.id === id);
+    if (saved && (n?.spokeWith || n?.said || n?.reference || n?.promised)) {
+      saveFact({
+        subject: target.name, predicate: 'call note', object: noteLine(saved), fact_type: 'reference',
+        source: 'errand', source_ref: `errand:${row.id}`, sensitive: true,
+      });
+    }
+  } catch (err) {
+    console.error(`[errands] could not save call notes for #${row.id}:`, err);
+  }
+}
+
+/** Earlier calls with this place, for the caller to pick up where things left off. */
+export function priorCallNotes(target: ErrandTarget, limit = 4): string[] {
+  return callNotesFor({ phone: target.phone, business: target.name }, limit).reverse().map(noteLine);
+}
+
 // ── Runner ──────────────────────────────────────────────────────────────────
 
 const inFlight = new Set<number>();
 
 /** What the callee-side AI is told for this attempt: goal, aim, owner notes, and what happened so far. */
 function callBrief(row: ErrandRow, env: Envelope): { goal: string; context: string } {
+  const target = env.targets[Math.min(row.target_idx, env.targets.length - 1)];
+  const earlier = target ? priorCallNotes(target) : [];
   const history = getErrandEvents(row.id, 20)
     .filter((e) => e.type === 'call_result' || e.type === 'callback' || e.type === 'note')
     .reverse()
@@ -372,6 +454,7 @@ function callBrief(row: ErrandRow, env: Envelope): { goal: string; context: stri
     env.window ? `Aim for: ${env.window}.` : '',
     env.notes.length ? `Owner's latest instructions: ${env.notes.join(' ')}` : '',
     history.length ? `What has happened so far on this errand:\n${history.join('\n')}` : '',
+    earlier.length ? `Earlier calls with ${target.name} (refer to who said what if it helps, e.g. "Pat mentioned on Monday…"):\n${earlier.map((l) => `- ${l}`).join('\n')}` : '',
     preferencesFor(env.goal),
   ].filter(Boolean).join('\n');
   return { goal, context: env.share };
@@ -404,7 +487,12 @@ export async function processErrand(id: number): Promise<void> {
     if (!errandsEnabled()) return;
     const dialNow = env.reply_mode && row.calls_made === 0;
     if (!dialNow && !inCallingHours()) {
-      updateErrand(id, { next_check_at: sqlTime(nextCallingTime()) });
+      const at = nextCallingTime();
+      updateErrand(id, { next_check_at: sqlTime(at) });
+      if (row.calls_made === 0 && !getErrandEvents(id, 50).some((e) => e.type === 'deferred')) {
+        addErrandEvent(id, 'deferred', `first call ${fmtWhen(at)}`);
+        await progressUpdate(row, `calls go out ${callingHoursText()}, so the first call to ${env.targets[row.target_idx]?.name} is ${fmtWhen(at)}.`, true);
+      }
       return;
     }
     if (countErrandCallsToday() >= DAILY_CALL_CAP()) {
@@ -473,6 +561,7 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
     result.transcriptTail,
   ].filter(Boolean).join('\n');
   addErrandEvent(id, 'call_result', line + (extra ? `\n${extra}` : ''));
+  recordCallNote(row, target, result);
   updateErrand(id, { call_state: null, call_started_at: null });
   const fresh = getErrand(id)!;
 
@@ -489,12 +578,12 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
     case 'done': {
       finish(fresh, 'done', result.outcome);
       const cal = result.booking ? ` ${await addBookingToCalendar(fresh, result.booking, target.name)}` : '';
-      await tellOwner(fresh, 'done', `${result.outcome}${cal}${result.followUp ? ` Your move: ${result.followUp}` : ''}`);
+      await tellOwner(fresh, 'done', `${result.outcome}${whoSaid(result)}${cal}${result.followUp ? ` Your move: ${result.followUp}` : ''}`);
       return;
     }
     case 'blocked': {
       block(fresh, result.followUp || result.outcome);
-      await tellOwner(fresh, 'blocked', `${target.name} needs you: ${result.followUp || result.outcome}`);
+      await tellOwner(fresh, 'blocked', `${target.name} needs you: ${result.followUp || result.outcome}${whoSaid(result)}`);
       return;
     }
     case 'failed':
@@ -512,6 +601,15 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
       const gap = moveOn ? 60_000 : env.reply_mode ? 15 * 60_000 : RETRY_GAP_MS();
       updateErrand(id, { next_check_at: sqlTime(new Date(Date.now() + gap)) });
       later(gap + 1000, () => { void processErrand(id); });
+      const nextTarget = env.targets[moveOn ? fresh.target_idx + 1 : fresh.target_idx];
+      if (nextTarget && fresh.calls_made < env.max_calls) {
+        const at = (env.reply_mode && fresh.calls_made === 0) ? new Date(Date.now() + gap) : nextCallingTime(new Date(Date.now() + gap));
+        const otherDay = at.toDateString() !== new Date().toDateString() || at.getTime() - Date.now() > 3 * 3600_000;
+        const when = at.getTime() - Date.now() < 5 * 60_000 ? 'now' : fmtWhen(at);
+        const next = moveOn ? `Trying ${nextTarget.name} next, ${when}.` : `Trying them again ${when}.`;
+        const hours = otherDay && !inCallingHours(new Date(Date.now() + gap)) ? ` (calls go out ${callingHoursText()})` : '';
+        await progressUpdate(fresh, `${target.name}: ${plainResult(result)}. ${next}${hours}`, moveOn || otherDay);
+      }
       return;
     }
   }
@@ -553,7 +651,7 @@ function callbackMatch(phone: string): CallbackMatch | null {
   return {
     errandId: hit.row.id, name: hit.target.name,
     goal: [env.goal, env.window ? `Aim for: ${env.window}.` : '', status].filter(Boolean).join('\n'),
-    share: env.share, notes: env.notes, history, keepTranscript: env.keep_transcript,
+    share: env.share, notes: env.notes, history: [...priorCallNotes(hit.target).map((l) => `Earlier call: ${l}`), ...history], keepTranscript: env.keep_transcript,
   };
 }
 
@@ -567,6 +665,8 @@ export async function applyCallbackResult(id: number, caller: string, result: Ca
   if (!row) return;
   const who = caller || 'They';
   addErrandEvent(id, 'callback', `${who} called back: ${result.status} — ${result.outcome}${result.followUp ? ` (next: ${result.followUp})` : ''}`);
+  const target = envelopeOf(row).targets.find((t) => t.name === caller);
+  if (target) recordCallNote(row, target, result, 'callback');
 
   let cal = '';
   const finishable = ['active', 'waiting', 'failed'].includes(row.status) && !row.call_state;
@@ -574,7 +674,7 @@ export async function applyCallbackResult(id: number, caller: string, result: Ca
     finish(row, 'done', result.outcome);
     if (result.booking) cal = ` ${await addBookingToCalendar(row, result.booking, who)}`;
   }
-  const text = `📞 ${who} called back: ${result.outcome}${cal}${result.followUp ? ` Your move: ${result.followUp}` : ''}`;
+  const text = `📞 ${who} called back: ${result.outcome}${whoSaid(result)}${cal}${result.followUp ? ` Your move: ${result.followUp}` : ''}`;
   await tellOwner(getErrand(id) ?? row, 'callback', text);
 }
 
@@ -595,12 +695,33 @@ async function tick(): Promise<void> {
   try {
     sweepStuckCalls();
     for (const row of getDueErrands()) await processErrand(row.id);
+    await silenceCheck();
   } catch (err) {
     console.error('[errands] tick failed:', err);
   }
 }
 
+/** An active errand the owner hasn't heard about in a few hours gets one "still on it" line. */
+async function silenceCheck(): Promise<void> {
+  if (notifyOverride) return;
+  for (const row of listErrands({ open: true })) {
+    if (row.status !== 'active' || row.call_state) continue;
+    const started = Date.parse(`${row.created_at.replace(' ', 'T')}Z`);
+    if (!dueForCheckIn(`errand:${row.id}`, started)) continue;
+    const so = row.calls_made ? `${whatHappened(row.id)} ` : '';
+    await progressUpdate(row, `still on it. ${so}${nextCallLine(row).replace(/ Don't tell.*$/, '')}`, false);
+  }
+}
+
+/** One line for "what's going on": what the calls ran into so far and when the next one is. */
+export function errandStatusLine(row: ErrandRow): string {
+  if (row.call_state) return 'on a call right now.';
+  const so = row.calls_made ? `${whatHappened(row.id)} ` : '';
+  return `${so}${nextCallLine(row).replace(/ Don't tell.*$/, '')}`;
+}
+
 export function startErrands(): void {
+  setErrandLine(errandStatusLine);
   setOneOffCallStarter((c) => startCallNow({
     goal: c.goal, deadline: null, targets: [{ name: c.name || fmtPhone(c.to), phone: c.to }],
     share: c.share, window: '', max_calls: 2, keep_transcript: c.keepTranscript, notes: [],
@@ -637,7 +758,18 @@ export function addErrandNote(id: number, note: string): string {
   if (row.status === 'waiting') Object.assign(patch, { status: 'active', next_check_at: sqlTime(new Date()) });
   updateErrand(id, patch);
   if (row.status === 'waiting') later(1000, () => { void processErrand(id); });
-  return row.status === 'waiting' ? `Got it. Errand #${id} is back on.` : `Noted on errand #${id}.`;
+  return `${row.status === 'waiting' ? `Got it. Errand #${id} is back on.` : `Noted on errand #${id}.`} ${nextCallLine(getErrand(id)!)}`;
+}
+
+/** When the next call actually happens, in the owner's time. Tell them this instead of "calling now". */
+export function nextCallLine(row: ErrandRow): string {
+  if (row.call_state) return 'A call is in progress right now.';
+  if (row.status !== 'active') return '';
+  const due = row.next_check_at ? new Date(`${row.next_check_at.replace(' ', 'T')}Z`) : new Date();
+  const at = nextCallingTime(due.getTime() > Date.now() ? due : new Date());
+  return at.getTime() - Date.now() < 6 * 60_000
+    ? 'Next call: within a few minutes.'
+    : `Next call: ${fmtWhen(at)}${inCallingHours() ? '' : ` (calls go out ${callingHoursText()})`}. Don't tell the owner it's happening now.`;
 }
 
 /** Owner allows more calls on a stuck errand, optionally restarting from the first number. */
@@ -669,10 +801,11 @@ export function describeErrand(row: ErrandRow, withLog = false): string {
   const env = envelopeOf(row);
   const target = env.targets[Math.min(row.target_idx, env.targets.length - 1)];
   const state = row.call_state ? `on a call with ${target.name}`
-    : row.status === 'active' ? `next try ${row.next_check_at ? `after ${row.next_check_at} UTC` : 'soon'} (${target.name})`
+    : row.status === 'active' ? `${nextCallLine(row).replace(/ Don't tell.*$/, '')} (${target.name})`
       : row.status === 'waiting' ? `waiting on you: ${row.outcome}` : `${row.status}${row.outcome ? `: ${row.outcome}` : ''}`;
   const head = `Errand #${row.id} — ${env.goal} · ${row.calls_made}/${env.max_calls} calls · ${state}`;
   if (!withLog) return head;
-  const log = getErrandEvents(row.id, 15).reverse().map((e) => `  ${e.at} ${e.type}${e.detail ? `: ${e.detail.split('\n')[0]}` : ''}`);
-  return [head, ...log].join('\n');
+  const log = getErrandEvents(row.id, 15).reverse().map((e) => `  ${fmtWhen(e.at)} ${e.type}${e.detail ? `: ${e.detail.split('\n')[0]}` : ''}`);
+  const notes = env.targets.flatMap((t) => priorCallNotes(t, 3).map((l) => `  ${t.name}: ${l}`));
+  return [head, ...log, ...(notes.length ? ['Call notes (who said what):', ...notes] : [])].join('\n');
 }

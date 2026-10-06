@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { pickThreads, threadBlock, updateThreads, type Thread } from './threads.js';
 import { captionPhoto, transcribePhotoForFamily } from './lib/photo-caption.js';
 import { budgetStopResponse, isLlmBudgetError } from './lib/token-budget.js';
 import type { GroupConfig } from './group-resolver.js';
 import type { User } from './user-resolver.js';
 import type { ImageData, DocumentData } from './channels/imessage.js';
 import { loadSystemBlocks, getRetrievedBlocksSmart } from './context-resolver.js';
-import { getRecentMessages, getRecentMessagesWithMetadata, listFamilyLists, saveMessage, appendToMessage, type MessageRow } from './db.js';
+import { getRecentMessages, getRecentMessagesWithMetadata, getMessagesSinceForGroups, listFamilyLists, saveMessage, appendToMessage, type MessageRow } from './db.js';
 import { toolRegistry, type ToolDef } from './tools/index.js';
 import { getProfileConfig } from './config.js';
 import { bindFamilyListAddRequest } from './family-list-intent.js';
@@ -32,6 +33,7 @@ import { logFamilyToolDecision } from './family-tool-observability.js';
 import {
   OPENAI_MODEL,
   createOpenAIResponse,
+  llmConfigured,
   openAIFunctionCalls,
   openAITextFromResponse,
   toOpenAIFunctionTool,
@@ -636,15 +638,23 @@ export async function runAgent(
   // (message + thread), render the retrieval block, and hand it to the otherwise
   // synchronous prompt builder. Falls back to the heuristic internally on any
   // failure. Only for real inbound messages; system-authored runs skip it.
-  const precomputedRetrieval = userMessage && groupConfig.key !== 'family'
-    ? await getRetrievedBlocksSmart(userMessage, groupConfig.key, history)
-    : groupConfig.key === 'family' ? '' : undefined;
+  // Ongoing topics (src/threads.ts): match this message to the topic it
+  // continues, so "what about flights" lands with the trip's record attached.
+  const threadsOn = !systemAuthored && !!userMessage && (groupConfig.key === 'admin' || groupConfig.key === 'family')
+    && process.env.THREADS_ENABLED !== 'false' && llmConfigured();
+  const turnStartedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const [precomputedRetrieval, matchedThreads] = await Promise.all([
+    userMessage && groupConfig.key !== 'family'
+      ? getRetrievedBlocksSmart(userMessage, groupConfig.key, history)
+      : Promise.resolve(groupConfig.key === 'family' ? '' : undefined),
+    threadsOn ? pickThreads(groupConfig.key, userMessage, history).catch(() => [] as Thread[]) : Promise.resolve([] as Thread[]),
+  ]);
 
   // OpenAI's Responses API accepts one instruction string. Keep the stable and
   // dynamic sections separate until this boundary so prompt caching can still be
   // measured and optimized later without changing context construction.
   const { staticPrefix, dynamic } = loadSystemBlocks(groupConfig, user, userMessage, precomputedRetrieval);
-  const instructions = `${staticPrefix}\n\n${dynamic}`;
+  const instructions = `${staticPrefix}\n\n${dynamic}${threadBlock(matchedThreads)}`;
   // Responses API content part types are role-sensitive: user messages use
   // `input_text`, while assistant history must use `output_text`. Sending an
   // assistant turn back as `input_text` produces a 400 on the next message
@@ -1045,6 +1055,14 @@ export async function runAgent(
 
   if (response && !(groupConfig.key === 'family' && response.trim() === FAMILY_SILENT_RESPONSE)) {
     if (!systemAuthored) saveMessage(groupConfig.key, 'assistant', 'assistant', response);
+    if (threadsOn) {
+      // Everything this turn added (the owner's message, emails sent, the reply), off the reply path.
+      // The message first (a Family row keeps its original iMessage time, so it may predate the turn).
+      const added = getMessagesSinceForGroups(turnStartedAt, [groupConfig.key]).filter((m) => m.role === 'assistant');
+      const exchange = [{ role: 'user', content: userMessage }, ...(added.length ? added : [{ role: 'assistant', content: response }])];
+      void updateThreads(groupConfig.key, exchange, matchedThreads)
+        .catch((err) => console.warn('[threads] update failed:', err instanceof Error ? err.message : err));
+    }
   }
 
   // A scheduled/background run that produced nothing (e.g. the budget refused

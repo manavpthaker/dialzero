@@ -135,8 +135,14 @@ function errandItem(r: ErrandRow): OpenItem {
     return { key: `errand:${r.id}`, title, status: 'waiting_on_you', line: `${title}: waiting on you: ${r.outcome ?? 'your answer'}`, ask: r.outcome ?? undefined, since: r.updated_at };
   }
   const calls = r.calls_made ? `${r.calls_made} call${r.calls_made === 1 ? '' : 's'} so far` : 'calling soon';
-  return { key: `errand:${r.id}`, title, status: 'working', line: `${title}: ${r.call_state ? 'on a call now' : calls}.`, since: r.updated_at };
+  const detail = errandLine ? errandLine(r) : `${r.call_state ? 'on a call now' : calls}.`;
+  return { key: `errand:${r.id}`, title, status: 'working', line: `${title}: ${detail}`, since: r.updated_at };
 }
+
+// errands.ts fills this in (what the calls ran into + the real next call time, in the owner's timezone);
+// a setter instead of an import keeps jobs.ts out of the errands import graph.
+let errandLine: ((r: ErrandRow) => string) | null = null;
+export function setErrandLine(fn: (r: ErrandRow) => string): void { errandLine = fn; }
 
 export function openItems(): OpenItem[] {
   const items = [

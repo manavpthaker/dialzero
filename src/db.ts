@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { toSqliteDate } from './lib/dates.js';
 import { startOfTodayET, startOfWeekET } from './lib/time-et.js';
+import { localDayStartUtc } from './lib/time.js';
 import { normalizePhone } from './lib/phone.js';
 import { randomUUID } from 'crypto';
 
@@ -691,6 +692,24 @@ const schedulingMigrations = [
     at          TEXT DEFAULT (datetime('now'))
   )`,
   'CREATE INDEX IF NOT EXISTS idx_errand_events ON errand_events(errand_id)',
+  // Who the assistant spoke with on a call and what they said, per business number, so a
+  // later call (or a callback) can say "Pat at the front desk told us…".
+  `CREATE TABLE IF NOT EXISTS call_notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone_key   TEXT,
+    business    TEXT NOT NULL,
+    errand_id   INTEGER,
+    direction   TEXT NOT NULL DEFAULT 'out',   -- out | callback
+    status      TEXT,
+    spoke_with  TEXT,
+    said        TEXT,
+    reference   TEXT,
+    direct_line TEXT,
+    promised    TEXT,
+    summary     TEXT NOT NULL,
+    at          TEXT DEFAULT (datetime('now'))
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_call_notes_phone ON call_notes(phone_key, at)',
   'ALTER TABLE actions ADD COLUMN errand_id INTEGER',
   // Wake-up calls (src/wakeup.ts). One row per call the owner set: a one-off
   // (date) or a weekly recurrence (days). cycle_date is the local morning being
@@ -1613,7 +1632,23 @@ export function markIMessagesExtracted(ids: number[]): void {
 // the message body, the sender handle, and the chat name. Optionally narrows to one
 // sender/chat handle. Newest first. Note: only covers messages logged since the bot
 // started observing (no historical backfill).
-export function searchIMessages(opts: { query?: string; handle?: string; chatId?: string; limit?: number }): IMessageLogRow[] {
+/** Every phone (last 10 digits) and email on file for people matching a name. */
+export function handlesForName(name: string): { phones: string[]; emails: string[] } {
+  const n = name.trim();
+  if (!n || /^[+\d\s().-]{7,}$/.test(n) || n.includes('@')) return { phones: [], emails: [] };
+  const ids = peopleSearch(n, 8).filter((p) => p.name.toLowerCase().includes(n.toLowerCase())).map((p) => p.id);
+  if (!ids.length) return { phones: [], emails: [] };
+  const marks = ids.map(() => '?').join(',');
+  const phones = (db.prepare(`SELECT phone FROM person_phones WHERE person_id IN (${marks})`).all(...ids) as { phone: string }[]).map((r) => r.phone);
+  const emails = (db.prepare(`SELECT email FROM person_emails WHERE person_id IN (${marks})`).all(...ids) as { email: string }[]).map((r) => r.email);
+  return { phones, emails };
+}
+
+export function searchIMessages(opts: {
+  query?: string; handle?: string; chatId?: string; limit?: number;
+  /** Local calendar days, YYYY-MM-DD, inclusive. */
+  since?: string; until?: string;
+}): IMessageLogRow[] {
   const clauses: string[] = ['privacy_scope IS NULL', 'text IS NOT NULL', "TRIM(text) <> ''"];
   const params: (string | number)[] = [];
   // The Family chat has its own conversation/memory namespace. Keep its raw
@@ -1630,19 +1665,43 @@ export function searchIMessages(opts: { query?: string; handle?: string; chatId?
     params.push(q, q, q);
   }
   if (opts.handle && opts.handle.trim()) {
-    const h = `%${opts.handle.trim()}%`;
-    clauses.push('(sender LIKE ? OR chat_id LIKE ? OR COALESCE(chat_name, \'\') LIKE ?)');
+    // A name matches every phone and email on file for that person, so a name
+    // finds their current phone chat, not just an old email-keyed thread.
+    const raw = opts.handle.trim();
+    const h = `%${raw}%`;
+    const ors = ['sender LIKE ?', 'chat_id LIKE ?', 'COALESCE(chat_name, \'\') LIKE ?'];
     params.push(h, h, h);
+    const digits = raw.replace(/\D/g, '');
+    const { phones, emails } = handlesForName(raw);
+    if (digits.length >= 10) phones.push(digits.slice(-10));
+    for (const ph of phones) { ors.push('sender LIKE ?', 'chat_id LIKE ?'); params.push(`%${ph}`, `%${ph}`); }
+    for (const em of emails) { ors.push('sender = ? COLLATE NOCASE', 'chat_id = ? COLLATE NOCASE'); params.push(em, em); }
+    clauses.push(`(${ors.join(' OR ')})`);
   }
   if (opts.chatId && opts.chatId.trim()) {
     clauses.push('chat_id = ?');
     params.push(opts.chatId.trim());
   }
-  const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
+  const day = /^\d{4}-\d{2}-\d{2}$/;
+  if (opts.since && day.test(opts.since)) {
+    clauses.push('ts >= ?');
+    params.push(localDayStartUtc(opts.since).toISOString());
+  }
+  if (opts.until && day.test(opts.until)) {
+    clauses.push('ts < ?');
+    params.push(localDayStartUtc(nextDay(opts.until)).toISOString());
+  }
+  const limit = Math.min(Math.max(opts.limit ?? 20, 1), 200);
   params.push(limit);
+  // A bounded window reads in conversation order; open-ended searches newest first.
+  const order = opts.since && opts.until ? 'ASC' : 'DESC';
   return db.prepare(
-    `SELECT * FROM imessage_log WHERE ${clauses.join(' AND ')} ORDER BY ts DESC LIMIT ?`
+    `SELECT * FROM imessage_log WHERE ${clauses.join(' AND ')} ORDER BY ts ${order} LIMIT ?`
   ).all(...params) as IMessageLogRow[];
+}
+
+function nextDay(day: string): string {
+  return new Date(Date.parse(`${day}T12:00:00Z`) + 86400_000).toISOString().slice(0, 10);
 }
 
 // ── Inbox-signal extraction dedup (inbox-signal-daemon) ──────────────────────
@@ -2493,6 +2552,7 @@ export function getStaleContacts(daysSince = 30, limit = 15): Person[] {
   return db.prepare(
     `SELECT * FROM people
      WHERE last_contact IS NOT NULL
+       AND COALESCE(relationship, '') <> 'company'
        AND datetime(last_contact) < datetime('now', '-' || ? || ' days')
      ORDER BY datetime(last_contact) ASC LIMIT ?`
   ).all(daysSince, limit) as Person[];
@@ -2898,6 +2958,12 @@ export interface Interaction {
 
 // Upsert with multi-key dedup: try (any of) emails → linkedin_url → otherwise insert.
 // Only patches fields that are explicitly provided; never overwrites with null.
+/** A stand-in name: an email address, or "unknown"/"unknown (+1…)". */
+export function isPlaceholderPersonName(name: string): boolean {
+  const n = name.trim();
+  return !n || /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(n) || /^unknown\b/i.test(n);
+}
+
 export function upsertPerson(input: {
   emails?: string[];
   phones?: string[];
@@ -2959,7 +3025,9 @@ export function upsertPerson(input: {
   } else {
     const sets: string[] = [];
     const params: (string | null)[] = [];
-    if (input.name) { sets.push('name = ?'); params.push(input.name); }
+    // Passive hooks pass the email or "unknown (+1…)" as the name when they have nothing
+    // better; that must never overwrite a real name.
+    if (input.name && !isPlaceholderPersonName(input.name)) { sets.push('name = ?'); params.push(input.name); }
     if (input.company) { sets.push('company = ?'); params.push(input.company); }
     if (input.role) { sets.push('role = ?'); params.push(input.role); }
     if (input.linkedin_url) { sets.push('linkedin_url = ?'); params.push(input.linkedin_url); }
@@ -4531,6 +4599,32 @@ export function addErrandEvent(errandId: number, type: string, detail?: string |
 
 export function getErrandEvents(errandId: number, limit = 50): ErrandEventRow[] {
   return db.prepare('SELECT * FROM errand_events WHERE errand_id = ? ORDER BY id DESC LIMIT ?').all(errandId, limit) as ErrandEventRow[];
+}
+
+export interface CallNoteRow {
+  id: number; phone_key: string | null; business: string; errand_id: number | null; direction: string;
+  status: string | null; spoke_with: string | null; said: string | null; reference: string | null;
+  direct_line: string | null; promised: string | null; summary: string; at: string;
+}
+
+export function addCallNote(n: Omit<CallNoteRow, 'id' | 'at' | 'phone_key' | 'direction'> & { phone?: string | null; direction?: string; at?: string }): number {
+  const key = n.phone ? normalizePhone(n.phone) || null : null;
+  return Number(db.prepare(
+    `INSERT INTO call_notes (phone_key, business, errand_id, direction, status, spoke_with, said, reference, direct_line, promised, summary, at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+  ).run(key, n.business, n.errand_id ?? null, n.direction ?? 'out', n.status ?? null, n.spoke_with ?? null, n.said ?? null,
+    n.reference ?? null, n.direct_line ?? null, n.promised ?? null, n.summary, n.at ?? null).lastInsertRowid);
+}
+
+/** Earlier calls with this business (by number, or by name), newest first. */
+export function callNotesFor(opts: { phone?: string | null; business?: string | null }, limit = 6): CallNoteRow[] {
+  const key = opts.phone ? normalizePhone(opts.phone) : '';
+  const name = (opts.business ?? '').trim();
+  if (!key && !name) return [];
+  return db.prepare(
+    `SELECT * FROM call_notes WHERE (? != '' AND phone_key = ?) OR (? != '' AND business = ? COLLATE NOCASE)
+     ORDER BY at DESC, id DESC LIMIT ?`,
+  ).all(key, key, name, name, limit) as CallNoteRow[];
 }
 
 /** Errand calls placed today (local), across all errands, for the daily cap. */

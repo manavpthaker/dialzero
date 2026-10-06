@@ -655,6 +655,7 @@ export function loadSystemBlocks(
     }
 
     staticParts.push(`\n--- Tool Routing ---`);
+    staticParts.push('- ONE CONVERSATION ACROSS CHANNELS: the history below mixes texts and phone calls ("[Phone call with you …]"). Treat them as one thread: "that", "the second one", "what we talked about" can point to either. Answer in the channel the owner used this time.');
     staticParts.push('- CHECK BEFORE CLAIMING IGNORANCE: before telling the user you don\'t have a note, fact, reminder, person, or task about something — OR when they ask "what do you have on X" / "what did I tell you about Y" / "what are you tracking" — call recall_memory("<subject>") (or omit the subject for an overview). It pulls everything across facts, people, tasks, and messages in one shot and sees data the context blocks below may have dropped. Never say "I don\'t have that" without calling it first.');
     staticParts.push('- Mentions of a meeting, event, "tomorrow", a day-of-week → list_events FIRST.');
     staticParts.push('- Mentions of a person by name → check the --- People Context --- and --- Relevant Knowledge --- blocks in the session context below first; if not there, call find_person("<name>") or facts_about("<name>"). Save durable info about people with note_about_person.');

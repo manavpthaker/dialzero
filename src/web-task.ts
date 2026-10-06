@@ -23,6 +23,7 @@ import {
 import { parseNumEnv } from './lib/env.js';
 import { todayET } from './lib/time-et.js';
 import { bookingDeps, runBrowserSubAgent, abortBrowserRun, FORBIDDEN_SHARE, looksLikeCardNumber } from './web-booking.js';
+import { updateOwner, cleanUpdate, isInfraError } from './lib/job-updates.js';
 import { openJob, setJobProgress, waitOnOwner, finishJob, takeAnswer, registerJobKind, type WaitNeed } from './jobs.js';
 import { getJob, getJobByRef, patchJob, markActionStopped } from './db.js';
 import { preferencesFor } from './lib/preferences.js';
@@ -196,7 +197,7 @@ Your LAST message must be ONLY this JSON (no other text):
 Use "done" only when the page showed the task finished (e.g. "Your subscription has been cancelled").`;
 }
 
-interface RunState { runs: number; progress: string[]; nextAt: number; email?: string | null; lastAskAt?: number }
+interface RunState { runs: number; progress: string[]; nextAt: number; email?: string | null; lastAskAt?: number; infraWaits?: number }
 
 function loadState(id: number): RunState {
   try {
@@ -213,6 +214,21 @@ const running = new Set<number>();
 const OWNER_NEEDED = /\b(log ?in|sign ?in|password|passcode|verification code|one-time code|2fa|two-factor|captcha|card|payment|pay\b|deposit|billing info|phone|call (them|us|support)|by phone|live chat|chat with|speak (to|with)|agent|representative|their (decision|choice|approval)|decide|which one|verify (your|their) identity|identity)\b/i;
 export function needsOwner(summary: string): boolean { return OWNER_NEEDED.test(summary); }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const INFRA_MAX_WAITS = 24;
+const INFRA_WAIT_MS = () => parseNumEnv('WEB_TASK_INFRA_WAIT_MS', 10 * 60_000);
+/** The owner's question, with what got done first when the run says more than the question ("the request was submitted"). */
+function askWithProgress(r: WebTaskResult): string {
+  const ask = r.ask ?? r.summary;
+  if (!r.ask || !r.summary || r.summary === r.ask) return ask;
+  const said = new Set(r.ask.toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 3));
+  const extra = r.summary.toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 3 && !said.has(w));
+  return extra.length >= 3 ? `${r.summary}\n${r.ask}` : ask;
+}
+/** A short name for the job in the owner's texts. */
+function jobName(p: WebTaskPayload): string {
+  const t = p.task.replace(/\s+/g, ' ').trim();
+  return t.length > 60 ? `${t.slice(0, 57).replace(/\s+\S*$/, '')}…` : t;
+}
 
 // One question per job per 15 minutes: a newer one still updates the job (the owner
 // sees it in whats_going_on and the check-in), it just isn't texted again.
@@ -314,8 +330,25 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
           result = { status: 'failed', summary: `Browser error: ${err instanceof Error ? err.message : String(err)}` };
         }
       }
-      // Stopped while that run was going: end quietly (they already knows).
+      // Stopped while that run was going: end quietly (they already know).
       if (getAction(actionId)?.status === 'cancelled') return { status: 'failed', summary: 'stopped' };
+      // The assistant's own plumbing failed (AI credit ran out, rate limit, outage),
+      // not the website: not a wall, not the owner's decision. Say so once in plain
+      // words, wait without using up a try, and pick back up on its own.
+      if (result.status === 'failed' && isInfraError(result.summary) && (st.infraWaits ?? 0) < INFRA_MAX_WAITS) {
+        st.infraWaits = (st.infraWaits ?? 0) + 1;
+        st.runs = Math.max(0, st.runs - 1);
+        saveState(actionId, st);
+        const credit = /insufficient_quota|credit_balance|no credits remaining/i.test(result.summary);
+        if (st.infraWaits === 1 && !p.practice) {
+          await updateOwner(`web-task:${actionId}`, credit
+            ? `⏸ ${jobName(p)}: paused. ${getBotName()}'s AI account is out of credit (check billing with your AI provider). I'll pick it back up on my own once it works.`
+            : `⏸ ${jobName(p)}: paused, ${getBotName()}'s AI service is having trouble. I'll retry on my own.`, { milestone: true, source: 'web-task', send: (subj, t) => d.notify(t, subj) });
+        }
+        await sleep(INFRA_WAIT_MS());
+        continue;
+      }
+      if (st.infraWaits && result.status !== 'failed') { st.infraWaits = 0; saveState(actionId, st); }
       // "Blocked" means they have to do something. A login or code they can sort by
       // text is a wait, not a stop; and the sub-agent sometimes says blocked
       // when it just couldn't find the way, which is a retry.
@@ -362,11 +395,14 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
         st.progress = [...st.progress, `Run ${st.runs} (paused for the owner): ${result.summary}`].slice(-10);
         st.runs = Math.max(0, st.runs - 1); // waiting on them doesn't use up a try
         saveState(actionId, st);
-        if (askAllowed(st)) try { await d.notify(result.ask ?? result.summary, `web-task:${actionId}:ask`); st.lastAskAt = Date.now(); saveState(actionId, st); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
+        if (askAllowed(st)) try { await d.notify(cleanUpdate(askWithProgress(result)), `web-task:${actionId}:ask`); st.lastAskAt = Date.now(); saveState(actionId, st); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
         return result;
       }
       if (result.status === 'done' || result.status === 'blocked') break;
-      if (result.status === 'in_progress') setJobProgress(jobId, result.summary);
+      if (result.status === 'in_progress') {
+        setJobProgress(jobId, result.summary);
+        if (!p.practice && !/^(Ran out of steps|A run hit the)/.test(result.summary)) await updateOwner(`web-task:${actionId}`, `🌐 ${jobName(p)}: ${result.summary}`, { source: 'web-task', send: (subj, t) => d.notify(t, subj) });
+      }
       st.progress = [...st.progress, `Run ${st.runs} (${result.status === 'in_progress' ? 'progress' : "didn't work"}): ${result.summary}`].slice(-10);
       // The same wall three runs in a row: more runs won't change it. Stop
       // and ask them, with the routes left (email them, do it themselves, skip it).
@@ -375,7 +411,7 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
         break;
       }
       if (result.status === 'failed' && sameWall(st.progress)) {
-        const ask = `${p.site.replace(/^https?:\/\//, '').replace(/\/.*$/, '')} keeps hitting the same wall: ${result.summary.replace(/\s*\(Not actually blocked[^)]*\)/, '')} Want me to email their support instead, or skip this part?`;
+        const ask = cleanUpdate(`${p.site.replace(/^https?:\/\//, '').replace(/\/.*$/, '')} keeps hitting the same wall: ${result.summary.replace(/\s*\(Not actually blocked[^)]*\)/, '')} Want me to email their support instead, or skip this part?`);
         waitOnOwner(jobId, 'decision', ask);
         saveState(actionId, st);
         if (askAllowed(st)) try { await d.notify(ask, `web-task:${actionId}:ask`); st.lastAskAt = Date.now(); saveState(actionId, st); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
@@ -410,7 +446,7 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
   deleteMemory(STATE_GROUP, `task_${actionId}`);
   if (p.practice) { console.log(`[web-task] practice #${actionId}: ${text}`); return result; }
   try {
-    await d.notify(text, `web-task:${actionId}`);
+    await d.notify(cleanUpdate(text), `web-task:${actionId}`);
   } catch (err) {
     console.error(`[web-task] could not tell the owner about #${actionId}:`, err);
   }

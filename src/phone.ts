@@ -25,8 +25,8 @@ import { withLlmContext } from './lib/llm-context.js';
 import { toPlainText } from './lib/plaintext.js';
 import { normalizePhone } from './lib/phone.js';
 import { isQuietHours, todayET } from './lib/time-et.js';
-import { getBotName, getOwner, ownerRef } from './config.js';
-import { addInteraction, getPersonHandles, setMemory, type Action } from './db.js';
+import { getBotName, getOwner, getTimezone, ownerRef } from './config.js';
+import { addInteraction, getPersonHandles, setMemory, saveMessage, type Action } from './db.js';
 import { resolvePerson } from './tools/outbound-send.js';
 import { sendInterrupt } from './cos-outbound.js';
 
@@ -91,6 +91,29 @@ export interface CallResult {
   menuLog?: string[];
   /** Something was booked on the call (appointment, reservation): goes on the owner's calendar. */
   booking?: CallBooking;
+  /** Who we spoke with and what they said, for the next call to this place. */
+  notes?: CallNotes;
+}
+
+export interface CallNotes {
+  /** Name and role, e.g. "Pat, front desk". */
+  spokeWith?: string;
+  /** What they told us, attributed: "registration is online only; walk-ins Saturday 10-2". */
+  said?: string;
+  /** Ticket, case, confirmation or work-order number. */
+  reference?: string;
+  /** A direct line, extension, or best time/way to reach them. */
+  directLine?: string;
+  /** What they said they'd do, and by when. */
+  promised?: string;
+}
+
+export function parseCallNotes(raw: unknown): CallNotes | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 500) : undefined);
+  const n: CallNotes = { spokeWith: str(r.spoke_with), said: str(r.said), reference: str(r.reference), directLine: str(r.direct_line), promised: str(r.promised) };
+  return Object.values(n).some(Boolean) ? n : undefined;
 }
 
 export interface CallBooking {
@@ -470,6 +493,7 @@ function errandSessionConfig(call: ErrandCall) {
       `Never give out card numbers, bank details, Social Security numbers, passwords, or PINs. Never agree to a charge, contract, cancellation fee, or anything beyond the goal; say ${owner} will confirm.`,
       `If you reach voicemail, leave one short message: who you are (${bot}, an AI assistant for ${full}), the reason for the call${callback ? `, and the callback number ${callback.split('').join(' ')}` : ''}, then end the call.`,
       "If you book anything (an appointment, reservation, pickup, visit), repeat the day and time back to them, ask for a confirmation number if they have one, and fill in end_call's booking.",
+      `Keep notes like a good assistant. When a person gives you information, an answer, or a commitment, ask for their name before you hang up ("And who am I speaking with, in case we follow up?"). Note any ticket, case or confirmation number, a direct line or extension, and anything they said they'd do and by when. Put all of it in end_call's notes. If the goal mentions earlier calls to this place, refer to them naturally ("Pat mentioned on Monday that…") instead of starting from scratch.`,
       'When the goal is done or clearly cannot be done, say thank you and goodbye, then call end_call with what happened.',
     ].filter(Boolean).join('\n'),
     tools: [...(call.callback ? [] : [{
@@ -496,6 +520,17 @@ function errandSessionConfig(call: ErrandCall) {
           },
           outcome: { type: 'string', description: `One sentence: what happened (e.g. "Booked for Sat 7pm, party of 4, under ${full}").` },
           follow_up: { type: 'string', description: `Anything ${owner} needs to do or decide next (with any callback number and time they gave), or empty.` },
+          notes: {
+            type: 'object',
+            description: 'What a good assistant writes down after a call. Fill whatever you learned; leave out what you did not.',
+            properties: {
+              spoke_with: { type: 'string', description: 'Name and role of who you spoke with, e.g. "Pat, front desk". "Automated system" or "voicemail" if no person.' },
+              said: { type: 'string', description: 'What they told you, in their terms: prices, availability, rules, next steps.' },
+              reference: { type: 'string', description: 'Ticket, case, confirmation or work-order number.' },
+              direct_line: { type: 'string', description: 'A direct number, extension, or the best time/way to reach them.' },
+              promised: { type: 'string', description: 'What they said they would do, and by when.' },
+            },
+          },
           booking: {
             type: 'object',
             description: `Fill this whenever something was booked (appointment, reservation). It goes on ${owner}'s calendar. Leave it out if nothing was booked.`,
@@ -544,6 +579,7 @@ function runCall(callId: string, call: PendingCall): void {
   let followUp = '';
   let status: CallStatus | '' = '';
   let booking: CallBooking | undefined;
+  let notes: CallNotes | undefined;
   let ended = false;
   // Set when press_keys hands the line to a new realtime session: this session
   // closing is then expected, and must not end the call or report a result.
@@ -657,6 +693,7 @@ function runCall(callId: string, call: PendingCall): void {
         const st = String(args.status || '');
         if (['done', 'retry_later', 'voicemail', 'blocked', 'failed'].includes(st)) status = st as CallStatus;
         booking = parseBooking(args.booking);
+        notes = parseCallNotes(args.notes);
         // Give the goodbye time to finish playing before the line drops.
         hangup(4000);
       }
@@ -683,16 +720,26 @@ function runCall(callId: string, call: PendingCall): void {
     if (wake) {
       try { wakeHooks?.onFinished(wake.id, wake.attempt, { awake: isAwake(), answers: wakeAnswers }); } catch (err) { console.error('[phone] wake hook failed:', err); }
     }
-    finishCall(callId, call, transcript, outcome, followUp, status, booking).catch((err) => console.error('[phone] wrap-up failed:', err));
+    finishCall(callId, call, transcript, outcome, followUp, status, booking, notes).catch((err) => console.error('[phone] wrap-up failed:', err));
   });
 }
 
 async function finishCall(
   callId: string, call: PendingCall, transcript: string[], outcome: string, followUp: string, status: CallStatus | '',
   booking?: CallBooking,
+  notes?: CallNotes,
 ): Promise<void> {
   const keep = call.kind === 'owner' || call.keepTranscript;
   if (keep && transcript.length) setMemory('phone', `call_${todayET()}_${callId.slice(-8)}`, transcript.join('\n').slice(0, 20_000));
+  // A call with the assistant continues by text: the conversation goes into the
+  // owner's thread (wake-up calls excluded; they're just "good morning").
+  if (call.kind === 'owner' && !call.wake && transcript.length >= 2) {
+    try {
+      const at = new Date().toLocaleTimeString('en-US', { timeZone: getTimezone(), hour: 'numeric', minute: '2-digit' });
+      const lines = transcript.slice(-40).join('\n').replace(/^Bot:/gm, `${getBotName()}:`);
+      saveMessage('admin', 'assistant', 'assistant', `[Phone call with you, ended ${at}]\n${lines.slice(-3000)}`);
+    } catch { /* history is best-effort */ }
+  }
   if (call.kind !== 'errand') return;
   const tail = keep ? transcript.slice(-6).join('\n') : '';
   if (call.personId) {
@@ -712,6 +759,7 @@ async function finishCall(
     endedWithoutOutcome: !status,
     menuLog: call.menuLog,
     ...(booking ? { booking } : {}),
+    ...(notes ? { notes } : {}),
   };
   if (call.callback) {
     if (call.errandId && errandHooks?.onCallback) errandHooks.onCallback(call.errandId, call.name || call.to, result);

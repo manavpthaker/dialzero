@@ -1,6 +1,5 @@
 import type { ToolDef } from './index.js';
-import { upsertPerson, addInteraction } from '../db.js';
-import { isLikelyAutomated } from './spark.js';
+import { upsertPerson, findPersonByEmail, isPlaceholderPersonName } from '../db.js';
 import {
   EMAIL_NOT_CONNECTED,
   formatEmailMessage,
@@ -18,23 +17,21 @@ function senderName(from: string): string | null {
   return name && !name.includes('@') ? name : null;
 }
 
-// Side effect: known senders flow into the people graph, same as the Spark
-// tools did. Never lets a graph write break an email read.
+// Side effect: a known sender still filed under a stand-in name (their email)
+// gets their real display name. Reading email never creates people or logs
+// interactions (that crowds real texts and calls out of People Context).
+// Never lets a graph write break an email read.
 function ingestSenders(messages: EmailMessage[]): void {
   try {
     const seen = new Set<string>();
     for (const m of messages) {
-      const email = m.fromEmail;
+      const email = m.fromEmail?.toLowerCase();
       if (!email || seen.has(email) || m.type === 'Sent' || m.type === 'Draft') continue;
       seen.add(email);
-      if (isLikelyAutomated(email)) continue;
-      const personId = upsertPerson({ name: senderName(m.from) || email, emails: [email] });
-      addInteraction({
-        person_id: personId,
-        channel: 'email',
-        ref: `email:${m.id}`,
-        occurred_at: m.date && !Number.isNaN(Date.parse(m.date)) ? m.date : new Date().toISOString(),
-      });
+      const name = senderName(m.from);
+      if (!name || !/\s/.test(name)) continue;
+      const person = findPersonByEmail(email);
+      if (person && isPlaceholderPersonName(person.name)) upsertPerson({ emails: [email], name });
     }
   } catch { /* never let graph writes break email reads */ }
 }

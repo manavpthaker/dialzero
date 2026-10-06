@@ -20,13 +20,15 @@ It's not an app you open. It's a contact in your phone.
 | "Remind me to call the plumber Thursday" | Adds a to-do (synced to your phone's Google Tasks) and brings it up at the right time. |
 | "Tell Sam I'm running 10 late" | Texts Sam for you, as you. |
 | "Email the landlord about the leak" | Writes and sends the email from your Gmail. |
-| "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. If the menu only leads to voicemail, it leaves the message. If it can't get through, it tells you exactly where it got stuck. |
+| "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. It notes who it spoke with and any reference number, and uses that on the next call. If the menu only leads to voicemail, it leaves the message. If it can't get through, it tells you exactly where it got stuck. While it works it sends a short update now and then (never a barrage) and tells you the real time of the next call. |
 | "Cancel my gym membership" | Does it on their website in your signed-in Chrome, turning down every offer to stay, or calls them if it has to. It keeps at it until it's done and texts you the result. It signs in with logins you've saved for it in 1Password (optional; it never sees the password) and picks up texted or emailed codes on its own. It never pays, and if they want something only you have, it asks you once, not every five minutes. |
 | "Book a table for 4 Saturday at 7" | Books it online (never enters a card), or calls if it can't. |
 | "Download all my recordings from that app, then cancel it" | Works through the site one step at a time, checks the files landed in Downloads, and only cancels once the export is done. |
 | (nothing, you're busy) | Texts you when it's time to leave for something on your calendar, or when two things overlap. |
 | "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
 | "Hey Siri, ask Milo what's next" (whatever you named it) | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
+| "What did Sam and I talk about on Aug 12?" | Searches your texts by person (every number and email it has for them) and by date. |
+| "Ok, what about flights?" (days later) | Picks up the trip you were planning: it keeps a running record of each ongoing topic, so you never have to re-explain. |
 | "What are you working on?" | One short list: what's waiting on you, what it's doing, and what it's keeping an eye on. Say "stop" about any of it. |
 | "Make sure they refund me" | Keeps checking your email (and follows up on its own after a cancellation) and only texts you if something's wrong. |
 | "What can we do with the kids Saturday morning?" | Researches it properly: real options for your dates, with hours, drive time, cost, why each fits your family, and a best plan. Remembers what you liked and didn't. |

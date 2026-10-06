@@ -91,7 +91,7 @@ try {
     assert.match(told.at(-1)!.text, /^Stuck on .*phone-only/);
   });
 
-  await check('long job: keeps going run after run, texts only the end', async () => {
+  await check('long job: keeps going run after run, one progress text then the result', async () => {
     const replies = [
       '{"status":"in_progress","summary":"Exported 20 of 42."}',
       '{"status":"in_progress","summary":"Exported 40 of 42."}',
@@ -111,7 +111,8 @@ try {
     assert.equal(r.status, 'done');
     assert.equal(prompts.length, 3);
     assert.match(prompts[2], /Exported 40 of 42/, 'later runs see earlier progress');
-    assert.equal(told.length - before, 1, 'one text, at the end');
+    assert.equal(told.length - before, 2, 'one progress text (the next is inside the 45-min gap), then the result');
+    assert.match(told[before].text, /Exported 20 of 42/);
     assert.equal(db.getAction(id)!.status, 'done');
     wb.setBookingDeps({
       isConnected: () => connected,

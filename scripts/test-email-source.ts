@@ -306,11 +306,18 @@ try {
 
   const toolCalls: Call[] = [];
   source.setEmailSourceForTests(gmailMod.createGmailEmailSource({ gmail: stubGmail([inbound, reply], toolCalls) }));
+  // Reading mail never creates people; it only gives a known person filed under
+  // their email address their real display name.
+  const firstList = await tool('email_list')({ newer_than: '1d' }) as string;
+  assert.match(firstList, /ID: 18c0a1b2c3d4e5f6/);
+  assert.equal(db.findPersonByEmail('contact@example.test'), undefined, 'reading mail does not create a person');
+  db.upsertPerson({ name: 'contact@example.test', emails: ['contact@example.test'] });
   const listed = await tool('email_list')({ newer_than: '1d' }) as string;
-  assert.match(listed, /ID: 18c0a1b2c3d4e5f6/);
   assert.match(listed, /Subject: Budget review/);
   const person = db.findPersonByEmail('contact@example.test');
-  assert.equal(person?.name, 'Christopher Contact', 'senders flow into the people graph');
+  assert.equal(person?.name, 'Christopher Contact', 'a stand-in name becomes the real display name');
+  db.upsertPerson({ name: 'contact@example.test', emails: ['contact@example.test'] });
+  assert.equal(db.findPersonByEmail('contact@example.test')?.name, 'Christopher Contact', 'an email never overwrites a real name');
   assert.equal(db.findPersonByEmail('owner@example.test'), undefined, 'sent mail does not create a person');
 
   assert.equal(await tool('email_archive')({ message_ids: ['18c0a1b2c3d4e5f6'] }), 'Archived 1 email(s).');
