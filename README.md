@@ -8,7 +8,7 @@ It's not an app you open. It's a contact in your phone.
 - **A chatbot waits for you. An assistant comes back to you.** Two short check-ins a day, a nudge when something's slipping, quiet the rest of the time.
 - **It asks before it spends or commits.** Anything that costs money or speaks for you in a way you didn't ask for waits for your "go".
 
-> Website: [dialzero.dev](https://dialzero.dev). Status: early open-source release. It works well for its author. Expect rough edges and read [What it can't do](#what-it-cant-do-yet).
+> Website: [dialzero.dev](https://dialzero.dev). Status: beta. An early open-source release that works well for its author. Expect rough edges and read [What it can't do](#what-it-cant-do-yet).
 
 ---
 
