@@ -43,6 +43,17 @@ Plus a shared **family chat**: add it to a group text with your partner and it k
 
 Every feature is optional. You pick what you want during setup.
 
+## How it's different
+
+If you've looked at OpenClaw or the other open-source assistants, here's what Dial Zero is built around:
+
+- **Phone calls are a first-class job.** It calls businesses for you, works the phone menu, talks to the front desk, and texts you the result with who it spoke to and any reference number. It can also answer its own number as your receptionist.
+- **It asks before it spends or speaks for you.** Anything that costs money or speaks for you in a way you didn't ask for waits for your "go".
+- **It comes back to you.** Two short check-ins a day and a nudge when something's slipping, quiet the rest of the time. A chatbot waits for you; an assistant comes back to you.
+- **Setup is a conversation, not a config file.** Open the folder in Claude Code or Codex, type "set me up," and it interviews you. Plan on about an hour.
+- **The part that knows you stays home.** Your memories, people and messages live in one file on your Mac.
+- **Everyday errands, with honest limits.** It does a defined set of jobs and says plainly what it can't do yet (see below).
+
 ## What you need
 
 - **A Mac that stays on** (a Mac mini is ideal; a laptop that's usually open works to start). macOS 14 or newer.
