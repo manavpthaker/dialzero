@@ -14,7 +14,7 @@
 //     chat (only the result line, nothing else from the owner's side).
 
 import { getMemory, setMemory, getRecentMemory, getErrand, getAction } from './db.js';
-import { getOwner } from './config.js';
+import { getOwner, getTimezone } from './config.js';
 import { withLlmContext } from './lib/llm-context.js';
 import { toPlainText } from './lib/plaintext.js';
 
@@ -55,6 +55,64 @@ export function pendingFamilyRequests(now = Date.now()): FamilyRequest[] {
   return listFamilyRequests().filter((r) => r.status === 'pending' && now - Date.parse(r.createdAt) < PENDING_TTL_MS);
 }
 
+// ── Standing OKs ("Sam can book dinners under $150 this week") ────────────────
+
+export interface FamilyGrant {
+  id: string;
+  personId: string;
+  personName: string;
+  kinds: FamilyRequestKind[];
+  /** What it covers, in the owner's words ("dinner", "the pool", "groceries"); '' = anything of these kinds. */
+  about: string;
+  until: string;
+  maxUsd?: number;
+  note: string;
+  createdAt: string;
+}
+
+const STOP = new Set(['the', 'and', 'for', 'with', 'any', 'all', 'our', 'out', 'book', 'booking', 'call', 'calls', 'calling', 'website', 'stuff', 'things']);
+const tokens = (t: string) => norm(t).split(' ').filter((w) => w.length >= 3 && !STOP.has(w));
+
+export function listGrants(now = Date.now()): FamilyGrant[] {
+  try {
+    const all = JSON.parse(getMemory(GROUP, 'grants') ?? '[]') as FamilyGrant[];
+    return all.filter((g) => Date.parse(g.until) > now);
+  } catch { return []; }
+}
+
+function saveGrants(gs: FamilyGrant[]): void { setMemory(GROUP, 'grants', JSON.stringify(gs)); }
+
+export function addGrant(g: Omit<FamilyGrant, 'id' | 'createdAt'>, now = Date.now()): FamilyGrant {
+  const grant: FamilyGrant = { ...g, id: Math.random().toString(36).slice(2, 6), createdAt: new Date(now).toISOString() };
+  saveGrants([...listGrants(now), grant]);
+  return grant;
+}
+
+/** Revoke by id, or every grant for a person ("sam"). Returns how many were removed. */
+export function revokeGrants(which: string, now = Date.now()): number {
+  const w = norm(which).replace(/^#/, '');
+  const all = listGrants(now);
+  const keep = all.filter((g) => g.id !== w && norm(g.personName) !== w && g.personId !== w && !(w && norm(g.personName).startsWith(w)));
+  saveGrants(keep);
+  return all.length - keep.length;
+}
+
+/** The standing OK that covers this request, if any: same person, same kind, about matches, not expired. */
+export function grantFor(requesterId: string, kind: FamilyRequestKind, words: string, now = Date.now()): FamilyGrant | null {
+  const said = tokens(words);
+  return listGrants(now).find((g) => {
+    if (g.personId !== requesterId || !g.kinds.includes(kind)) return false;
+    const want = tokens(g.about);
+    if (!want.length) return true;
+    // "dinner" covers "dinners"/"dinner reservation": compare word stems.
+    return want.some((w) => said.some((x) => x.startsWith(w.slice(0, 5)) || w.startsWith(x.slice(0, 5))));
+  }) ?? null;
+}
+
+function untilLabel(iso: string): string {
+  return new Date(iso).toLocaleString('en-US', { timeZone: getTimezone(), weekday: 'short', month: 'short', day: 'numeric' });
+}
+
 export interface FamilyRequestDeps {
   notifyOwner: (text: string, id: string) => Promise<void>;
   runOwnerTurn: (prompt: string) => Promise<string>;
@@ -88,8 +146,11 @@ export function setFamilyRequestDeps(over: Partial<FamilyRequestDeps> | null): v
 
 const TOOL_FOR: Record<FamilyRequestKind, string> = { call: 'call_now', booking: 'book_online', website: 'do_online (for groceries on Instacart: instacart_cart, from_family_list true if they mean the Groceries list)' };
 
-function runPrompt(r: FamilyRequest): string {
-  return `[Family chat request #${r.id}, approved] ${r.requesterName} asked in the Family chat: "${r.words}". Run it now: look up what you need (the business's real number or site with web_search), then use ${TOOL_FOR[r.kind]} with owner_request set to exactly: "${r.words}". The result is posted to the Family chat automatically. Reply to me in one short line.`;
+function runPrompt(r: FamilyRequest, grant?: FamilyGrant | null): string {
+  const limits = grant
+    ? ` This is covered by ${ownerFirst()}'s standing OK ("${grant.note}"). Stay inside it${grant.maxUsd ? `: nothing over $${grant.maxUsd}, and no deposit or charge without asking ${ownerFirst()}` : ''}; if it needs more than that, stop and ask ${ownerFirst()}.`
+    : '';
+  return `[Family chat request #${r.id}, approved] ${r.requesterName} asked in the Family chat: "${r.words}". Run it now: look up what you need (the business's real number or site with web_search), then use ${TOOL_FOR[r.kind]} with owner_request set to exactly: "${r.words}".${limits} The result is posted to the Family chat automatically. Reply to me in one short line.`;
 }
 
 /** From the Family chat. Returns the line to say there. */
@@ -109,6 +170,15 @@ export async function requestFromFamily(input: { requesterId: string; requesterN
     save(r);
     deps.runOwnerTurn(runPrompt(r)).catch((err) => console.error('[family-request] owner run failed:', err));
     return `On it: ${r.what}. I'll post what I find here.`;
+  }
+  // The owner already said yes to this kind of thing for this person, for now.
+  const grant = grantFor(input.requesterId, input.kind, `${r.words} ${r.what}`, now);
+  if (grant) {
+    r.status = 'approved'; r.approvedAt = r.createdAt;
+    save(r);
+    deps.runOwnerTurn(runPrompt(r, grant)).catch((err) => console.error('[family-request] grant run failed:', err));
+    await deps.notifyOwner(`👪 ${r.requesterName} asked: "${r.words}". Running it under your OK (${grant.note}, until ${untilLabel(grant.until)}).`, r.id).catch(() => {});
+    return `On it: ${r.what}. ${ownerFirst()} already OK'd these, so I'll post what happens here.`;
   }
   save(r);
   await deps.notifyOwner(`👪 ${r.requesterName} asked in the family chat: "${r.words}". Reply go to run it, or no.`, r.id);

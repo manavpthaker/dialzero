@@ -184,5 +184,29 @@ await check('instacart_cart fills the cart from the Groceries list, stops before
   assert.match(idea, /Go\?/, 'without the owner\'s words it is only a proposal');
 });
 
+await check('a standing OK runs matching requests without asking; others still ask; it expires', async () => {
+  const permit = familyRequestOwnerTools.find((x) => x.definition.name === 'family_permission')!;
+  const memberName = getProfileConfig().members[0]?.name.split(' ')[0] ?? 'Sam';
+  const until = new Date(clock + 3 * 86400_000).toISOString();
+  const said = String(await permit.handler({ action: 'grant', person: memberName, kinds: ['booking'], about: 'dinner', until, max_usd: 150, note: `${memberName} can book dinners under $150 this week` }, { groupKey: 'admin', userId: OWNER, currentMessage: 'x' }));
+  assert.match(said, /^Done: .*can book dinners under \$150 this week/);
+  assert.equal(String(await permit.handler({ action: 'grant', person: memberName, kinds: ['booking'] }, { groupKey: 'admin', userId: MEMBER, currentMessage: 'x' })), 'Only the owner can give family permissions.');
+  const book = 'Book us a dinner table at Rosie\'s Saturday at 6';
+  const ranBefore = ran.length;
+  const out = String(await askTool.handler({ kind: 'booking', request: book, what: 'book dinner at Rosie\'s Sat 6pm' }, { groupKey: 'family', userId: MEMBER, currentMessage: book }));
+  assert.match(out, /Alex already OK'd these/);
+  assert.equal(ran.length, ranBefore + 1);
+  assert.match(ran.at(-1)!, /standing OK .*nothing over \$150/);
+  assert.match(told.at(-1)!, /Running it under your OK/);
+  const call = 'Call the pediatrician about Jamie\'s checkup';
+  const out2 = String(await askTool.handler({ kind: 'call', request: call, what: 'call the pediatrician' }, { groupKey: 'family', userId: MEMBER, currentMessage: call }));
+  assert.match(out2, /Asked Alex to OK it/, 'a different kind still asks');
+  const lunch = 'Book a lunch spot for Sunday';
+  assert.match(String(await askTool.handler({ kind: 'booking', request: lunch, what: 'book lunch Sunday' }, { groupKey: 'family', userId: MEMBER, currentMessage: lunch })), /Asked Alex/, 'outside "dinner" still asks');
+  clock += 4 * 86400_000;
+  assert.equal(fr.grantFor(MEMBER, 'booking', book, clock), null, 'expired');
+  assert.match(String(await permit.handler({ action: 'list' }, { groupKey: 'admin', userId: OWNER, currentMessage: 'x' })), /No standing OKs|until/);
+});
+
 rmSync(tempRoot, { recursive: true, force: true });
 console.log(`\nFamily "smarter" tests passed: ${passed} checks.`);

@@ -438,6 +438,19 @@ try {
     assert.equal(db.callNotesFor({ phone: '3125557000' }).length, 0);
   });
 
+  await check('business hours: parsed, closed means wait, open with a margin', () => {
+    const h = errands.parseHours([{ days: 'Tue-Sun', open: '5pm', close: '9:30pm' }, { days: 'nope', open: 'x', close: 'y' }])!;
+    assert.deepEqual(h, [{ days: [2, 3, 4, 5, 6, 0], open: 17 * 60, close: 21 * 60 + 30 }]);
+    const tueAt = (hh: number, mm = 0) => new Date(Date.UTC(2026, 9, 6, hh + 4, mm)); // Tue Oct 6, test timezone America/New_York = UTC-4
+    assert.equal(errands.isOpenAt(h, tueAt(14)), false, '2pm: closed');
+    assert.equal(errands.isOpenAt(h, tueAt(17, 2)), false, 'first minutes: still opening');
+    assert.equal(errands.isOpenAt(h, tueAt(17, 10)), true);
+    assert.equal(errands.isOpenAt(h, tueAt(21, 20)), false, 'last 20 minutes: closing');
+    assert.equal(errands.isOpenAt(h, new Date(Date.UTC(2026, 9, 5, 21))), false, 'Monday: closed all day');
+    assert.equal(errands.nextOpenTime(h, tueAt(14), false).toISOString(), tueAt(17, 5).toISOString());
+    assert.equal(errands.isOpenAt(undefined, tueAt(3)), true, 'no hours known: no limit');
+  });
+
   console.log(`\nErrand tests passed: ${passed} checks.`);
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

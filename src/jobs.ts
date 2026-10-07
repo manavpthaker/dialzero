@@ -11,7 +11,7 @@
 // tools in tools/jobs.ts (whats_going_on, stop_job, answer_job) work across all.
 
 import {
-  insertJob, getJob, getJobByRef, patchJob, listOpenJobRows, listErrands, listRecentJobRows,
+  insertJob, getJob, getJobByRef, patchJob, listOpenJobRows, listErrands, listRecentJobRows, getMemory, setMemory,
   type JobRow, type ErrandRow,
 } from './db.js';
 
@@ -27,6 +27,8 @@ interface KindHooks {
   resume?: (job: JobRow) => void;
   /** Stop it now. Returns one plain line for the owner. */
   stop?: (job: JobRow) => Promise<string> | string;
+  /** The owner changed what they want mid-way ("make it 7:30"). Returns one plain line. */
+  change?: (job: JobRow, change: string) => Promise<string> | string;
 }
 const hooks: Record<string, KindHooks> = {};
 export function registerJobKind(kind: string, h: KindHooks): void { hooks[kind] = { ...hooks[kind], ...h }; }
@@ -244,6 +246,25 @@ export async function stopItem(whichText: string): Promise<string> {
   return said || `Stopped: ${job.title.replace(/\.$/, '')}.`;
 }
 
+/** The owner changed a running job ("actually make it 7:30", "skip the export"): the job picks it up now. */
+export async function changeItem(whichText: string, change: string): Promise<string> {
+  const text = change.trim();
+  if (!text) return 'What should change?';
+  const m = matchItem(whichText);
+  if ('none' in m) return 'Nothing matching is in progress. If this is a new request, start it as one.';
+  if ('ambiguous' in m) return `Ask which one to change, in plain words: ${which(m.ambiguous)}?`;
+  const [kind, idStr] = m.item.key.split(':');
+  const id = Number(idStr);
+  if (kind === 'errand') {
+    const { addErrandNote } = await import('./errands.js');
+    return addErrandNote(id, text);
+  }
+  const job = getJob(id)!;
+  const change_ = hooks[job.kind]?.change;
+  if (!change_) return `I can't change "${job.title}" mid-way; stop it and start a new one.`;
+  return change_(job, text);
+}
+
 /** Short block for the prompt, so a bare reply ("482913", "done") maps to the right job. */
 export function waitingBlock(): string {
   // Only what's been waiting on the owner in the last day: an old ask in every
@@ -253,4 +274,71 @@ export function waitingBlock(): string {
   const waiting = openItems().filter((i) => i.status === 'waiting_on_you' && Date.parse(i.since.includes('T') ? i.since : `${i.since.replace(' ', 'T')}Z`) >= dayAgo);
   if (!waiting.length) return '';
   return `## Waiting on the owner\n${waiting.map((i) => `- ${i.line}`).join('\n')}\nIf their message answers one of these (a code, "done", "logged in", a choice), call answer_job with their words. Don't ask them which unless it's truly unclear.`;
+}
+
+// ── Check-ins on jobs the owner is waiting on ──
+
+const REMIND_AFTER_H = 4;
+const MAX_REMINDERS = 2;
+
+function updateKey(j: JobRow): string | null {
+  if (j.kind === 'web_task' && j.ref?.startsWith('action:')) return `web-task:${j.ref.slice(7)}`;
+  if (j.kind === 'email_thread') return `email-thread:${j.id}`;
+  return null;
+}
+
+/**
+ * A running website job or email thread the owner hasn't heard about in a few
+ * hours gets one "still on it" line; one waiting on THEM gets a reminder (twice
+ * at most) so a question doesn't sit unseen. Errands do their own (errands.ts).
+ */
+export async function jobCheckIns(now = Date.now()): Promise<number> {
+  const { dueForCheckIn, updateOwner, lastUpdateAt, cleanUpdate } = await import('./lib/job-updates.js');
+  const { isQuietHours } = await import('./lib/time-et.js');
+  if (isQuietHours()) return 0;
+  let sent = 0;
+  for (const j of listOpenJobRows(30)) {
+    const key = updateKey(j);
+    if (!key || j.title.startsWith('Practice:')) continue;
+    const started = Date.parse(j.created_at.includes('T') ? j.created_at : `${j.created_at.replace(' ', 'T')}Z`);
+    if (j.status === 'working') {
+      if (!dueForCheckIn(key, started, now)) continue;
+      const what = j.kind === 'email_thread' ? `waiting on their reply${j.progress ? ` (${j.progress})` : ''}` : (j.progress || 'working on it');
+      if (await updateOwner(key, `⏳ ${j.title} Still on it: ${what}`)) sent++;
+    } else if (j.status === 'waiting_on_you' && j.ask && !/Request it\?/.test(j.ask)) {
+      // (A ride's "Request it?" goes stale in minutes: no reminder hours later.)
+      const remindKey = `remind:${j.id}`;
+      const count = Number(getMemory('job-updates', remindKey) ?? 0);
+      const last = lastUpdateAt(key) ?? started;
+      if (count >= MAX_REMINDERS || now - last < REMIND_AFTER_H * 3600_000) continue;
+      const { needsHands, withTakeover } = await import('./lib/takeover.js');
+      const hands = j.waiting_for === 'login' || needsHands(j.ask);
+      const ask = `👋 Still waiting on you so I can finish "${j.title}": ${j.ask}`;
+      if (await updateOwner(key, hands ? withTakeover(cleanUpdate(ask), j.code_host, { id: j.id, label: j.ask }) : ask, { milestone: true })) {
+        setMemory('job-updates', remindKey, String(count + 1));
+        sent++;
+      }
+    }
+  }
+  return sent;
+}
+
+/** The take-over page's Done button: the step the owner did on the screen counts as their answer. */
+export function resumeJobById(id: number, answer: string): boolean {
+  const job = getJob(id);
+  if (!job || !['waiting_on_you', 'working'].includes(job.status)) return false;
+  patchJob(id, { answer, answered_at: new Date().toISOString(), status: 'working' });
+  const resume = hooks[job.kind]?.resume;
+  if (resume) setTimeout(() => resume(getJob(id)!), 200);
+  return true;
+}
+
+/** The take-over page's "Couldn't do it" button: stop the job the way stop_job does. */
+export async function failJobById(id: number): Promise<boolean> {
+  const job = getJob(id);
+  if (!job || !['waiting_on_you', 'working'].includes(job.status)) return false;
+  const stop = hooks[job.kind]?.stop;
+  if (stop) await stop(job);
+  if (getJob(id)?.status !== 'stopped') finishJob(id, 'stopped', "The owner couldn't finish the step on the screen.");
+  return true;
 }

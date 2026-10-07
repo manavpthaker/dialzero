@@ -3,7 +3,7 @@
 
 import type { ToolDef, ToolContext } from './index.js';
 import { getOwner } from '../config.js';
-import { describeOpenItems, stopItem, answerItem } from '../jobs.js';
+import { describeOpenItems, stopItem, answerItem, changeItem } from '../jobs.js';
 
 const isOwner = (c?: ToolContext) => !!c?.userId && c.userId === getOwner().id;
 
@@ -46,6 +46,24 @@ export const jobTools: ToolDef[] = [
     handler: async (input, context) => {
       if (!isOwner(context)) return 'Only the owner can answer for a job.';
       return answerItem(String(input.which ?? ''), String(input.answer ?? ''));
+    },
+  },
+  {
+    definition: {
+      name: 'change_job',
+      description: 'Change something already in progress for the owner (a website job, a call errand) without starting over. USE WHEN they add to or change a running job: "actually make it 7:30", "skip the export, just cancel", "also ask about Saturday", "use my work email for that". "which" = their words for the job (blank if only one is going); "change" = what to do differently, in their words. Not for answering a question the job asked them (that is answer_job), and not for a brand-new request.',
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          which: { type: 'string', description: 'Their words for the job, e.g. "the roofer calls". Blank if only one thing is going.' },
+          change: { type: 'string', description: 'What should change, in their words.' },
+        },
+        required: ['change'],
+      },
+    },
+    handler: async (input, context) => {
+      if (!isOwner(context)) return 'Only the owner can change jobs.';
+      return changeItem(String(input.which ?? ''), String(input.change ?? ''));
     },
   },
 ];

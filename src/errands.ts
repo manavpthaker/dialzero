@@ -23,7 +23,7 @@
 
 import { preferencesFor } from './lib/preferences.js';
 import {
-  toDialable, isFictionalNumber, placeErrandCall, setErrandCallHooks, setOneOffCallStarter, isPhoneConfigured,
+  toDialable, isFictionalNumber, placeErrandCall, setErrandCallHooks, setOneOffCallStarter, isPhoneConfigured, twilioCallInfo,
   type CallResult, type CallBooking, type CallbackMatch,
 } from './phone.js';
 import { sendInterrupt } from './cos-outbound.js';
@@ -37,7 +37,7 @@ import { getBotName, getOwner, getTimezone } from './config.js';
 import {
   createErrand, getErrand, updateErrand, getDueErrands, getErrandsInCall, getErrandsForCallback, addErrandEvent,
   getErrandEvents,
-  listErrands, countErrandCallsToday, proposeAction, confirmAction, markActionExecuting,
+  listErrands, countErrandCallsToday, getMemory, setMemory, proposeAction, confirmAction, markActionExecuting,
   markActionDone, markActionFailed, findPersonByPhone, addCallNote, callNotesFor, saveFact,
   type Action, type ErrandRow, type CallNoteRow,
 } from './db.js';
@@ -64,7 +64,64 @@ export function errandsEnabled(): boolean {
 
 // ── Envelope ────────────────────────────────────────────────────────────────
 
-export interface ErrandTarget { name: string; phone: string }
+export interface ErrandTarget { name: string; phone: string; hours?: OpenSpan[] }
+
+/** When a business is open: days 0=Sun..6=Sat, minutes after midnight, local time. */
+export interface OpenSpan { days: number[]; open: number; close: number }
+
+const DAY_IDX: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+function dayList(raw: string): number[] {
+  const t = raw.toLowerCase().replace(/\s+/g, '');
+  if (/daily|everyday|all/.test(t)) return [0, 1, 2, 3, 4, 5, 6];
+  const out = new Set<number>();
+  for (const part of t.split(',')) {
+    const m = part.match(/^([a-z]{3})[a-z]*(?:-([a-z]{3})[a-z]*)?$/);
+    if (!m || DAY_IDX[m[1]] === undefined) continue;
+    const a = DAY_IDX[m[1]];
+    const b = m[2] !== undefined && DAY_IDX[m[2]] !== undefined ? DAY_IDX[m[2]] : a;
+    for (let d = a; ; d = (d + 1) % 7) { out.add(d); if (d === b) break; }
+  }
+  return [...out];
+}
+function minutes(raw: string): number | null {
+  const m = String(raw).trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!m) return null;
+  let h = Number(m[1]) % 12;
+  if (!m[3] && Number(m[1]) >= 12) h = Number(m[1]);
+  if (m[3] === 'pm') h += 12;
+  if (!m[3] && Number(m[1]) === 24) h = 24;
+  return h * 60 + Number(m[2] ?? 0);
+}
+/** [{days:"Tue-Sun", open:"5pm", close:"9:30pm"}] → spans; anything unreadable is dropped. */
+export function parseHours(raw: unknown): OpenSpan[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const spans: OpenSpan[] = [];
+  for (const r of raw as Array<Record<string, unknown>>) {
+    const days = dayList(String(r.days ?? ''));
+    const open = minutes(String(r.open ?? ''));
+    const close = minutes(String(r.close ?? ''));
+    if (days.length && open !== null && close !== null && close > open) spans.push({ days, open, close });
+  }
+  return spans.length ? spans : undefined;
+}
+
+/** Open now, with a margin: not in the first 5 or last 20 minutes (they're busy opening or closing). */
+export function isOpenAt(hours: OpenSpan[] | undefined, at = new Date()): boolean {
+  if (!hours?.length) return true;
+  const { dow, hour, minute } = etParts(at);
+  const m = hour * 60 + minute;
+  return hours.some((h) => h.days.includes(dow) && m >= h.open + 5 && m <= h.close - 20);
+}
+
+/** The next time (15-min steps) that's both inside calling rules and inside their hours. */
+export function nextOpenTime(hours: OpenSpan[] | undefined, from = new Date(), alsoCallingHours = true): Date {
+  const t = new Date(from.getTime());
+  for (let i = 0; i < 4 * 24 * 8; i++) {
+    if (isOpenAt(hours, t) && (!alsoCallingHours || inCallingHours(t))) return t;
+    t.setTime(t.getTime() + 5 * 60_000);
+  }
+  return t;
+}
 export interface Envelope {
   goal: string;
   deadline: string | null;      // YYYY-MM-DD, local
@@ -126,7 +183,8 @@ export function prepareErrand(p: Record<string, unknown>): Prepared {
     if (person && !personalOk) {
       return { error: `${fmtPhone(dial)} belongs to ${person.name}, a personal contact. Errands call businesses; to call a person, confirm they're OK getting a call from ${getBotName()}, then pass personal_ok: true.` };
     }
-    if (!targets.some((x) => x.phone === dial)) targets.push({ name, phone: dial });
+    const hours = parseHours(t.hours);
+    if (!targets.some((x) => x.phone === dial)) targets.push({ name, phone: dial, ...(hours ? { hours } : {}) });
   }
 
   const share = String(p.share ?? '').trim();
@@ -288,8 +346,10 @@ function whoSaid(result: CallResult): string {
 function plainResult(result: CallResult): string {
   const menu = result.menuLog?.length ? ` (phone menu: ${result.menuLog.join('; ').replace(/Pressed (\d) \(([^)]*)\)/g, 'pressed $1 for $2')})` : '';
   if (result.status === 'voicemail') return `went to voicemail${result.botSaid ? ', left a message' : ''}`;
-  if (result.endedWithoutOutcome || /without a recorded outcome/i.test(result.outcome)) return `the call dropped before I reached anyone${menu}`;
-  const o = result.outcome.replace(/\s+/g, ' ').trim();
+  const theySaid = result.transcriptTail?.split('\n').filter((l) => l.startsWith('Them: ')).at(-1)?.slice(6).trim();
+  const heard = theySaid ? `; last thing they said: "${theySaid.slice(0, 120)}"` : '';
+  if (result.endedWithoutOutcome || /without a recorded outcome/i.test(result.outcome)) return `the call dropped${theySaid ? '' : ' before I reached anyone'}${menu}${heard}`;
+  const o = result.outcome.replace(/\s+/g, ' ').trim().replace(/\.$/, '');
   return `${o.length > 160 ? `${o.slice(0, 157)}…` : o}${menu}`;
 }
 
@@ -485,6 +545,9 @@ export async function processErrand(id: number): Promise<void> {
       return;
     }
     if (!errandsEnabled()) return;
+    // Phone line down (tunnel off, or the last call's voice never joined): a call would only reach silence. Wait.
+    const voiceDownUntil = Number(getMemory('errands', 'voice_down_until') ?? 0);
+    if ((!linkUp || voiceDownUntil > Date.now()) && !notifyOverride) { updateErrand(id, { next_check_at: sqlTime(new Date(Date.now() + 5 * 60_000)) }); return; }
     const dialNow = env.reply_mode && row.calls_made === 0;
     if (!dialNow && !inCallingHours()) {
       const at = nextCallingTime();
@@ -495,6 +558,18 @@ export async function processErrand(id: number): Promise<void> {
       }
       return;
     }
+    // Closed right now: don't call a restaurant at 2pm when it opens at 5.
+    const tgt = env.targets[row.target_idx];
+    if (tgt?.hours && !isOpenAt(tgt.hours)) {
+      const at = nextOpenTime(tgt.hours, new Date(), !dialNow);
+      updateErrand(id, { next_check_at: sqlTime(at) });
+      if (!getErrandEvents(id, 30).some((e) => e.type === 'closed' && e.detail?.startsWith(`[t${row.target_idx}]`))) {
+        addErrandEvent(id, 'closed', `[t${row.target_idx}] ${tgt.name} is closed; calling ${fmtWhen(at)}`);
+        await progressUpdate(row, `${tgt.name} is closed right now, so I'll call when they're open: ${fmtWhen(at)}.`, true);
+      }
+      return;
+    }
+    // The cap stops a runaway loop (the per-number and per-errand limits are what keep any one business from being pestered).
     if (countErrandCallsToday() >= DAILY_CALL_CAP()) {
       // Try again tomorrow morning; the cap protects against a runaway loop.
       updateErrand(id, { next_check_at: sqlTime(nextCallingTime(new Date(Date.now() + 12 * 3600_000))) });
@@ -514,10 +589,11 @@ export async function processErrand(id: number): Promise<void> {
     updateErrand(id, { call_state: 'dialing', call_started_at: sqlTime(new Date()), calls_made: row.calls_made + 1 });
     addErrandEvent(id, 'dialing', `[t${row.target_idx}] ${target.name} (${fmtPhone(target.phone)}), action #${actionId}`);
     try {
-      await placeErrandCall({
+      const sid = await placeErrandCall({
         errandId: id, actionId, to: target.phone, name: target.name,
         goal: brief.goal, context: brief.context, keepTranscript: env.keep_transcript,
       });
+      if (sid) addErrandEvent(id, 'twilio', sid);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       markActionFailed(actionId, msg);
@@ -546,8 +622,9 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
   // Dials to this target since the owner last restarted the list (newest first).
   const events = getErrandEvents(id, 200);
   const restart = events.findIndex((e) => e.type === 'note' && e.detail?.includes('starting over'));
-  const attemptsHere = (restart === -1 ? events : events.slice(0, restart))
-    .filter((e) => e.type === 'dialing' && e.detail?.startsWith(`[t${row.target_idx}]`)).length;
+  const sinceRestart = restart === -1 ? events : events.slice(0, restart);
+  const attemptsHere = sinceRestart.filter((e) => e.type === 'dialing' && e.detail?.startsWith(`[t${row.target_idx}]`)).length
+    - sinceRestart.filter((e) => e.type === 'phone_down' && e.detail?.startsWith(`[t${row.target_idx}]`)).length;
 
   // Close out the audit row for this call attempt.
   const lastDial = events.find((e) => e.type === 'dialing');
@@ -608,7 +685,8 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
         const when = at.getTime() - Date.now() < 5 * 60_000 ? 'now' : fmtWhen(at);
         const next = moveOn ? `Trying ${nextTarget.name} next, ${when}.` : `Trying them again ${when}.`;
         const hours = otherDay && !inCallingHours(new Date(Date.now() + gap)) ? ` (calls go out ${callingHoursText()})` : '';
-        await progressUpdate(fresh, `${target.name}: ${plainResult(result)}. ${next}${hours}`, moveOn || otherDay);
+        // Every call result goes to the owner (a few a day at most), so they hear how it's going.
+        await progressUpdate(fresh, `${target.name}: ${plainResult(result)}. ${next}${hours}`, true);
       }
       return;
     }
@@ -679,22 +757,104 @@ export async function applyCallbackResult(id: number, caller: string, result: Ca
 }
 
 /** Calls whose result never arrived: a dial that never connected, or a dropped call. */
-function sweepStuckCalls(): void {
+async function sweepStuckCalls(): Promise<void> {
   const now = Date.now();
   for (const row of getErrandsInCall()) {
     const started = row.call_started_at ? new Date(`${row.call_started_at}Z`).getTime() : 0;
     const limit = row.call_state === 'dialing' ? DIAL_TIMEOUT_MS : CONNECTED_TIMEOUT_MS();
-    if (started && now - started > limit) {
-      const outcome = row.call_state === 'dialing' ? 'No answer.' : 'The call dropped without a result.';
+    if (!started || now - started <= limit) continue;
+    if (row.call_state === 'dialing') {
+      // Twilio sends no status callback, so ask it what happened to the leg.
+      // Their side answered but the assistant's voice never joined = our phone link
+      // is down (e.g. the tunnel is off, so the business hears silence).
+      const sid = getErrandEvents(row.id, 20).find((e) => e.type === 'twilio')?.detail ?? '';
+      const info = sid ? await twilioCallInfo(sid) : null;
+      if (info && ['queued', 'ringing', 'in-progress'].includes(info.status) && now - started < 15 * 60_000) continue;
+      if (info && info.status === 'completed' && info.duration > 0) { await phoneDown(row); continue; }
+      const outcome = info?.status === 'busy' ? 'The line was busy.'
+        : info?.status === 'failed' ? "The call didn't go through."
+          : 'No answer.';
       void applyCallResult(row.id, { status: 'retry_later', outcome, followUp: '', transcriptTail: '' });
+    } else {
+      void applyCallResult(row.id, { status: 'retry_later', outcome: 'The call dropped without a result.', followUp: '', transcriptTail: '' });
     }
   }
 }
 
+/** A dial that failed on our side: it doesn't use up a call, and the owner hears about the outage once. */
+async function phoneDown(row: ErrandRow): Promise<void> {
+  const env = envelopeOf(row);
+  const target = env.targets[row.target_idx];
+  const dial = getErrandEvents(row.id, 50).find((e) => e.type === 'dialing');
+  const aid = Number(dial?.detail?.match(/action #(\d+)/)?.[1]);
+  if (aid) markActionFailed(aid, 'The phone link was down; the call never connected on our side.');
+  updateErrand(row.id, {
+    call_state: null, call_started_at: null, calls_made: Math.max(0, row.calls_made - 1),
+    next_check_at: sqlTime(new Date(Date.now() + 15 * 60_000)),
+  });
+  addErrandEvent(row.id, 'phone_down', `[t${row.target_idx}] ${target?.name}: answered, but the assistant's voice never joined (phone link down). Not counted.`);
+  // Stop every errand from dialing for an hour: each try is a business hearing silence.
+  setMemory('errands', 'voice_down_until', String(Date.now() + 60 * 60_000));
+  await phoneLinkAlert(`${target?.name ?? 'a business'} picked up and heard silence`);
+}
+
+// ── Phone link health (Tailscale Funnel carries the OpenAI + Twilio webhooks) ──
+
+const TAILSCALE_BIN = env('TAILSCALE_BIN', '/Applications/Tailscale.app/Contents/MacOS/Tailscale');
+// Kept in memory (group `errands`) so a restart mid-outage doesn't forget it already
+// warned the owner, or dial into the outage while it waits 10 minutes to warn again.
+let linkDownSince: number | null = Number(getMemory('errands', 'link_down_since') ?? '') || null;
+let linkAlerted = getMemory('errands', 'link_alerted') === '1';
+let linkUp = true;
+function saveLink(): void {
+  setMemory('errands', 'link_down_since', linkDownSince ? String(linkDownSince) : '');
+  setMemory('errands', 'link_alerted', linkAlerted ? '1' : '0');
+}
+
+async function phoneLinkAlert(detail: string): Promise<void> {
+  if (notifyOverride) return;
+  linkAlerted = true;
+  saveLink();
+  const tsUp = await tailscaleRunning();
+  const fix = tsUp === false
+    ? 'Tailscale is off on this Mac: click its menu-bar icon and Connect.'
+    : `Tailscale is on, so OpenAI isn't calling ${getBotName()} back: check the webhook at platform.openai.com → Settings → Webhooks (re-enable it, then Send test event).`;
+  await updateOwner('phone-link', `⚠️ ${getBotName()}'s phone line is down, so calls are paused for now (${detail}). ${fix} Calls resume on their own.`, { milestone: true, source: 'errands' });
+}
+
+async function tailscaleRunning(): Promise<boolean | null> {
+  try {
+    const { execFile } = await import('node:child_process');
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile(TAILSCALE_BIN, ['status', '--json'], { timeout: 10_000 }, (err, stdout) => (err && !stdout ? reject(err) : resolve(stdout)));
+    });
+    return (JSON.parse(out) as { BackendState?: string }).BackendState === 'Running';
+  } catch {
+    return null; // can't tell; don't alarm
+  }
+}
+
+/** Every tick: Tailscale down 10+ min → one text; back up → one "back" text. */
+async function checkPhoneLink(): Promise<void> {
+  if (!isPhoneConfigured() || notifyOverride) return;
+  const up = await tailscaleRunning();
+  if (up === null) return;
+  linkUp = up;
+  if (up) {
+    if (linkAlerted) await updateOwner('phone-link', `✅ ${getBotName()}'s phone line is back. Paused calls pick up on their own.`, { milestone: true, source: 'errands' });
+    if (linkDownSince || linkAlerted) { linkDownSince = null; linkAlerted = false; saveLink(); }
+    return;
+  }
+  if (!linkDownSince) { linkDownSince = Date.now(); saveLink(); }
+  if (!linkAlerted && Date.now() - linkDownSince >= 10 * 60_000) await phoneLinkAlert('Tailscale is off on this Mac');
+}
+
 async function tick(): Promise<void> {
   try {
-    sweepStuckCalls();
-    for (const row of getDueErrands()) await processErrand(row.id);
+    await checkPhoneLink();
+    await sweepStuckCalls();
+    // Don't dial into a known outage: the call would only reach silence.
+    if (linkUp && !linkAlerted) for (const row of getDueErrands()) await processErrand(row.id);
     await silenceCheck();
   } catch (err) {
     console.error('[errands] tick failed:', err);
@@ -728,6 +888,7 @@ export function startErrands(): void {
   }, c.actionId));
   setErrandCallHooks({
     onConnected: (id) => {
+      setMemory('errands', 'voice_down_until', '');
       updateErrand(id, { call_state: 'connected' });
       addErrandEvent(id, 'connected');
     },

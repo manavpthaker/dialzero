@@ -7,8 +7,8 @@
 // `actions`, owner only) is the owner's yes/no from their DM.
 
 import type { ToolDef, ToolContext } from './index.js';
-import { getProfileConfig, getOwner } from '../config.js';
-import { requestFromFamily, decideFamilyRequest, type FamilyRequestKind } from '../family-requests.js';
+import { getProfileConfig, getOwner, getBotName, getTimezone } from '../config.js';
+import { requestFromFamily, decideFamilyRequest, addGrant, listGrants, revokeGrants, type FamilyRequestKind } from '../family-requests.js';
 
 export const familyErrandTools: ToolDef[] = [
   {
@@ -54,6 +54,54 @@ export const familyRequestOwnerTools: ToolDef[] = [
     handler: async (input, context) => {
       if (!isOwner(context)) return 'Only the owner can approve family requests.';
       return decideFamilyRequest(typeof input.id === 'string' && input.id ? input.id.replace(/^#/, '') : undefined, input.action === 'decline' ? 'decline' : 'approve');
+    },
+  },
+  {
+    definition: {
+      name: 'family_permission',
+      description: `A standing OK, with an end date, for something a family member may have ${getBotName()} do from the Family chat without asking the owner each time. USE WHEN the owner says "Sam can book dinners under $150 this week", "let Sam call the pediatrician whenever they need this month", "stop letting Sam…", or asks what someone can do. action grant: person (first name), kinds (call / booking / website), about (what it covers in a word or two, e.g. "dinner"; empty = anything of those kinds), until (ISO with offset from the date table; default end of next Sunday), max_usd (optional), note (the owner's words). list: what's active. revoke: person or #id. It never covers spending money; ${getBotName()} still stops before any payment.`,
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          action: { type: 'string', enum: ['grant', 'list', 'revoke'] },
+          person: { type: 'string' },
+          kinds: { type: 'array', items: { type: 'string', enum: ['call', 'booking', 'website'] } },
+          about: { type: 'string' },
+          until: { type: 'string' },
+          max_usd: { type: 'number' },
+          note: { type: 'string', description: 'The owner\'s words, e.g. "Sam can book dinners under $150 this week".' },
+        },
+        required: ['action'],
+      },
+    },
+    handler: async (input, context) => {
+      if (!isOwner(context)) return 'Only the owner can give family permissions.';
+      const fmt = (iso: string) => new Date(iso).toLocaleString('en-US', { timeZone: getTimezone(), weekday: 'short', month: 'short', day: 'numeric' });
+      if (input.action === 'list') {
+        const gs = listGrants();
+        return gs.length ? gs.map((g) => `#${g.id} ${g.note} (until ${fmt(g.until)})`).join('\n') : 'No standing OKs right now; every family request comes to you.';
+      }
+      if (input.action === 'revoke') {
+        const n = revokeGrants(String(input.person ?? ''));
+        return n ? `Removed ${n}. Those requests come to you again.` : 'Nothing matching to remove.';
+      }
+      const name = String(input.person ?? '').trim().toLowerCase();
+      const member = getProfileConfig().members.find((m) => m.name.toLowerCase().startsWith(name) || m.id === name);
+      if (!member) return `I only know family-chat members: ${getProfileConfig().members.map((m) => m.name).join(', ') || 'none'}.`;
+      const kinds = (Array.isArray(input.kinds) ? input.kinds : []).filter((k): k is FamilyRequestKind => ['call', 'booking', 'website'].includes(String(k)));
+      if (!kinds.length) return 'Which kinds: call, booking, website?';
+      let until = Date.parse(String(input.until ?? ''));
+      if (!Number.isFinite(until)) {
+        const d = new Date(); d.setDate(d.getDate() + ((7 - d.getDay()) % 7 || 7)); d.setHours(23, 59, 0, 0);
+        until = d.getTime();
+      }
+      if (until - Date.now() > 92 * 86400_000) return 'Keep it to three months at most; the owner can renew it.';
+      const g = addGrant({
+        personId: member.id, personName: member.name.split(' ')[0], kinds, about: String(input.about ?? ''),
+        until: new Date(until).toISOString(), maxUsd: typeof input.max_usd === 'number' ? input.max_usd : undefined,
+        note: String(input.note ?? '').trim() || `${member.name.split(' ')[0]} can ${kinds.join('/')}${input.about ? ` (${input.about})` : ''}`,
+      });
+      return `Done: ${g.note}, until ${fmt(g.until)}. Requests like that from them run without asking you; you'll get a one-line heads-up each time.`;
     },
   },
 ];

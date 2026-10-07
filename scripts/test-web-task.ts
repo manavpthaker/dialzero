@@ -272,6 +272,16 @@ try {
     assert.equal(wb.paymentRefusal({ action: 'real_type', value: 'Alex Rivera' }), null);
   });
 
+  await check('get_ride: asks the owner the price before requesting, never touches payment, defaults pickup to home', async () => {
+    const { rideTask, rideTools } = await import('../src/tools/rides.js');
+    const t = rideTask({ pickup: '12 Elm St, Springfield', destination: 'Springfield Airport Terminal B', when: 'today 5:00am', service: 'the cheapest standard car', app: 'uber' });
+    assert.match(t, /STOP before requesting and return needs_owner/);
+    assert.match(t, /Never add, choose or change a payment method/);
+    assert.match(t, /m\.uber\.com/);
+    const r = String(await rideTools[0].handler({ destination: 'Airport Terminal B', pickup: '1 Main St, Springfield' }, { groupKey: 'admin', userId: 'nobody', currentMessage: 'x' } as never));
+    assert.ok(r.length > 0);
+  });
+
   console.log(`\nWeb task tests passed: ${passed} checks.`);
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

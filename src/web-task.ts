@@ -24,7 +24,8 @@ import { parseNumEnv } from './lib/env.js';
 import { todayET } from './lib/time-et.js';
 import { bookingDeps, runBrowserSubAgent, abortBrowserRun, FORBIDDEN_SHARE, looksLikeCardNumber } from './web-booking.js';
 import { updateOwner, cleanUpdate, isInfraError } from './lib/job-updates.js';
-import { openJob, setJobProgress, waitOnOwner, finishJob, takeAnswer, registerJobKind, type WaitNeed } from './jobs.js';
+import { needsHands, showJobTab, withTakeover } from './lib/takeover.js';
+import { jobCheckIns, openJob, setJobProgress, waitOnOwner, finishJob, takeAnswer, registerJobKind, type WaitNeed } from './jobs.js';
 import { getJob, getJobByRef, patchJob, markActionStopped } from './db.js';
 import { preferencesFor } from './lib/preferences.js';
 
@@ -209,6 +210,8 @@ function loadState(id: number): RunState {
 function saveState(id: number, st: RunState): void { setMemory(STATE_GROUP, `task_${id}`, JSON.stringify(st)); }
 
 const running = new Set<number>();
+/** The owner's mid-job changes, waiting for the run loop's next pass. */
+const pendingChanges = new Map<number, string[]>();
 
 // What only the owner can do: log in, pay, decide, or talk to a person.
 const OWNER_NEEDED = /\b(log ?in|sign ?in|password|passcode|verification code|one-time code|2fa|two-factor|captcha|card|payment|pay\b|deposit|billing info|phone|call (them|us|support)|by phone|live chat|chat with|speak (to|with)|agent|representative|their (decision|choice|approval)|decide|which one|verify (your|their) identity|identity)\b/i;
@@ -275,6 +278,11 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
         if (getAction(actionId)?.status === 'cancelled') return { status: 'failed', summary: 'cancelled' };
         waited++;
         await sleep(RETRY_GAP_MS());
+      }
+      const changes = pendingChanges.get(actionId);
+      if (changes?.length) {
+        pendingChanges.delete(actionId);
+        st.progress = [...st.progress, ...changes.map((c) => `OWNER CHANGED THE PLAN (follow this over anything above): ${c}`)].slice(-10);
       }
       st.runs++;
       saveState(actionId, st);
@@ -395,7 +403,13 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
         st.progress = [...st.progress, `Run ${st.runs} (paused for the owner): ${result.summary}`].slice(-10);
         st.runs = Math.max(0, st.runs - 1); // waiting on them doesn't use up a try
         saveState(actionId, st);
-        if (askAllowed(st)) try { await d.notify(cleanUpdate(askWithProgress(result)), `web-task:${actionId}:ask`); st.lastAskAt = Date.now(); saveState(actionId, st); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
+        // A step only the owner's hands can do (a login, a "prove you're human" box):
+        // bring the tab forward and send the take-over link with the question.
+        const hands = need === 'login' || needsHands(`${result.ask ?? ''} ${result.summary}`);
+        if (hands && !p.practice) await showJobTab();
+        const pageHost = hands ? (host ?? await hostReader().catch(() => null)) : null;
+        const askText = hands ? withTakeover(cleanUpdate(askWithProgress(result)), pageHost, { id: jobId, label: result.ask ?? result.summary }) : cleanUpdate(askWithProgress(result));
+        if (askAllowed(st)) try { await d.notify(askText, `web-task:${actionId}:ask`); st.lastAskAt = Date.now(); saveState(actionId, st); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
         return result;
       }
       if (result.status === 'done' || result.status === 'blocked') break;
@@ -541,6 +555,27 @@ registerJobKind('web_task', {
     if (!a || a.status !== 'executing') return;
     void runWebTask(actionId, JSON.parse(a.payload_json) as WebTaskPayload);
   },
+  change: (job, change) => {
+    const actionId = Number(job.ref?.split(':')[1]);
+    const a = getAction(actionId);
+    if (!a || a.status !== 'executing') return `"${job.title}" isn't running anymore; start it again with the change.`;
+    // Picked up by the run loop before its next run (a running loop holds its
+    // own copy of the state, so writing it here would be overwritten).
+    pendingChanges.set(actionId, [...(pendingChanges.get(actionId) ?? []), change]);
+    if (!running.has(actionId)) {
+      const st = loadState(actionId);
+      st.nextAt = 0;
+      saveState(actionId, st);
+    }
+    // Mid-run: close this run's window so the next one starts now with the change.
+    if (activeRun?.actionId === actionId) {
+      abortBrowserRun();
+    } else {
+      if (job.status === 'waiting_on_you') patchJob(job.id, { status: 'working', waiting_for: null, ask: null, answer: null });
+      if (!running.has(actionId)) void runWebTask(actionId, JSON.parse(a.payload_json) as WebTaskPayload);
+    }
+    return `Got it. "${job.title.replace(/\.$/, '')}" picks up your change on its next step (a few minutes at most): ${change}`;
+  },
   stop: (job) => {
     const actionId = Number(job.ref?.split(':')[1]);
     markActionStopped(actionId, 'stopped by the owner');
@@ -554,7 +589,7 @@ registerJobKind('web_task', {
 
 export function startWebTaskRunner(): void {
   setTimeout(() => { resumeWebTasks(); }, 20_000);
-  setInterval(() => { resumeWebTasks(); }, TICK_MS);
+  setInterval(() => { resumeWebTasks(); void jobCheckIns().catch((err) => console.error('[jobs] check-ins failed:', err)); }, TICK_MS);
 }
 
 /** Owner-asked path: an auto-confirmed actions row (kind 'web_task'), run in the background. */

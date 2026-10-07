@@ -22,7 +22,8 @@ It's not an app you open. It's a contact in your phone.
 | "Email the landlord about the leak" | Writes and sends the email from your Gmail. |
 | "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. It notes who it spoke with and any reference number, and uses that on the next call. If the menu only leads to voicemail, it leaves the message. If it can't get through, it tells you exactly where it got stuck. While it works it sends a short update now and then (never a barrage) and tells you the real time of the next call. |
 | "Cancel my gym membership" | Does it on their website in your signed-in Chrome, turning down every offer to stay, or calls them if it has to. It keeps at it until it's done and texts you the result. It signs in with logins you've saved for it in 1Password (optional; it never sees the password) and picks up texted or emailed codes on its own. It never pays, and if they want something only you have, it asks you once, not every five minutes. |
-| "Book a table for 4 Saturday at 7" | Books it online (never enters a card), or calls if it can't. |
+| "Book a table for 4 Saturday at 7" | Books it online (never enters a card), or calls if it can't (only while they're open). |
+| (a website job hits a login it can't do) | Texts you a one-time link that opens this Mac's screen in your phone's browser; do the step, tap Done, and the job carries on (optional). Changed your mind mid-job ("make it 7:30")? Just say so. |
 | "Download all my recordings from that app, then cancel it" | Works through the site one step at a time, checks the files landed in Downloads, and only cancels once the export is done. |
 | (nothing, you're busy) | Texts you when it's time to leave for something on your calendar, or when two things overlap. |
 | "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
@@ -32,6 +33,8 @@ It's not an app you open. It's a contact in your phone.
 | "What are you working on?" | One short list: what's waiting on you, what it's doing, and what it's keeping an eye on. Say "stop" about any of it. |
 | "Make sure they refund me" | Keeps checking your email (and follows up on its own after a cancellation) and only texts you if something's wrong. |
 | "What can we do with the kids Saturday morning?" | Researches it properly: real options for your dates, with hours, drive time, cost, why each fits your family, and a best plan. Remembers what you liked and didn't. |
+| "Get me an Uber to the airport at 5" | Sets up the ride in your Chrome, texts you the price and wait, and only requests it after your yes. |
+| (someone calls its number) | Answers as your receptionist: asks who's calling and why, puts contacts through (you press 1 to take it), and texts you a message from everyone else. Quiet hours and "messages only" are yours to set. |
 | "Put the grocery list on Instacart" | Fills your Instacart cart in Chrome from the shared grocery list and stops before checkout. |
 | A voice memo | Transcribes it and files away what matters. |
 | "What did I tell Alex at lunch?" | If you use [Omi](https://omi.me) to record your conversations, it looks it up, and quietly keeps the promises, to-dos and people from each one (optional). |

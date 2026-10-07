@@ -206,7 +206,8 @@ export async function extractionComplete(opts: {
   // Everything below here spends money. When the local model was supposed to
   // serve this and could not, the work is now billing a paid provider nobody
   // budgeted for, so the ambient lane gets its tighter fallback ceiling.
-  assertWithinBudget(currentLlmContext().lane, { localDown: localUnavailable });
+  // Awaited: an un-awaited rejection here used to crash the whole process.
+  await assertWithinBudget(currentLlmContext().lane, { localDown: localUnavailable });
   return openAIText({ model: openaiModel, prompt, maxOutputTokens: maxTokens, reasoningEffort: 'low' });
 }
 

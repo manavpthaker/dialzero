@@ -274,6 +274,21 @@ try {
     assert.equal(told.length - before, 1, 'no "click the link" text to them');
   });
 
+  await check('a login wait sends the take-over link; change_job reruns with the owner\'s change on top', async () => {
+    process.env.TAKEOVER_URL = 'vnc://100.64.0.1';
+    replies = ['{"status":"needs_owner","need":"login","ask":"Streamly needs you to log in.","summary":"At the Streamly login page."}'];
+    const { id, done } = wt.startWebTask({ task: 'cancel the Streamly subscription', site: 'https://streamly.example.com' } as never, 'Cancel Streamly.', 'admin');
+    await done;
+    assert.match(told.at(-1)!, /Streamly needs you to log in\.[\s\S]*vnc:\/\/100\.64\.0\.1 opens the Mac's screen/);
+    replies = ['{"status":"done","summary":"Cancelled."}'];
+    const said = await tool('actions', 'change_job').handler({ which: 'streamly', change: 'just downgrade to free instead of cancelling' }, ctx as never);
+    assert.match(String(said), /picks up your change/);
+    await wait(150);
+    assert.match(prompts.at(-1)!, /OWNER CHANGED THE PLAN \(follow this over anything above\): just downgrade to free/);
+    assert.equal(db.getAction(id)!.status, 'done');
+    delete process.env.TAKEOVER_URL;
+  });
+
   await check('two jobs queued for the browser: each run sees itself as the active job', async () => {
     let chain: Promise<unknown> = Promise.resolve();
     const seen: Array<number | null> = [];

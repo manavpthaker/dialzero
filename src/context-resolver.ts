@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import type { GroupConfig } from './group-resolver.js';
 import type { User } from './user-resolver.js';
-import { listFamilyListItems, getRecentMessagesWithMetadata, getOpenTasks, getOverdueTasksAll, getMemory, getRecentMemory, searchFacts, factsAbout, factsByPersonId, getFactsByType, peopleSearch, getRecentInteractions, searchIMessages, type Fact, type Person, type Interaction, type IMessageLogRow, getLatestLocation } from './db.js';
+import { listPendingActions, listFamilyListItems, getRecentMessagesWithMetadata, getOpenTasks, getOverdueTasksAll, getMemory, getRecentMemory, searchFacts, factsAbout, factsByPersonId, getFactsByType, peopleSearch, getRecentInteractions, searchIMessages, type Fact, type Person, type Interaction, type IMessageLogRow, getLatestLocation } from './db.js';
 import { toolRegistry } from './tools/index.js';
 import { getProfileConfig, getTimezone } from './config.js';
 import { localOffset, tzAbbrev } from './lib/time.js';
@@ -714,6 +714,15 @@ export function loadSystemBlocks(
   if (user.tone === 'direct' && !isSharedAudience) {
     try { const w = waitingBlock(); if (w) dynamicParts.push(`\n${w}`); } catch { /* tracker unavailable */ }
     try { const f = familyRequestBlock(); if (f) dynamicParts.push(`\n${f}`); } catch { /* none */ }
+    // Proposals waiting on the owner's "go". The ids never appear in the chat, so
+    // without this a bare "Go" made the model propose the same call again.
+    try {
+      const dayAgo = new Date(Date.now() - 24 * 3600_000).toISOString().replace('T', ' ').slice(0, 19);
+      const pend = listPendingActions(10).filter((a) => a.proposed_at >= dayAgo);
+      if (pend.length) {
+        dynamicParts.push(`\n## Waiting on the owner's "go"\n${pend.map((a) => `- #action:${a.id} (${a.proposed_at.slice(11, 16)} UTC): ${a.summary.replace(/\s+/g, ' ').slice(0, 160)}`).join('\n')}\n"go" / "yes" / "do it" → confirm_action on the newest one that matches what they're answering (the one you just proposed). Never propose the same thing again because they said go.`);
+      }
+    } catch { /* none */ }
   }
   if (taskState) dynamicParts.push(taskState);
 

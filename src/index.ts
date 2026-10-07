@@ -25,6 +25,7 @@ import { startFamilyRequests } from './family-requests.js';
 import { startOmiSync } from './omi-sync.js';
 import { recordRunningSha } from './lib/running-sha.js';
 import { startChromeHealth } from './lib/chrome-health.js';
+import { startTakeoverServer } from './takeover-server.js';
 import { startCheckins } from './checkins.js';
 import { automationsOff, automationAllowed } from './lib/automations-off.js';
 import { withLlmContext } from './lib/llm-context.js';
@@ -57,6 +58,14 @@ async function sendIfAudienceStillApproved(
   await sendMessage(recipient, text);
   return true;
 }
+
+// A stray rejected promise in one background loop must not take down the phone
+// line, iMessage and everything else with it (an un-awaited budget check once
+// crashed it in a loop). Log it loudly; keep running.
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? `${reason.name}: ${reason.message}\n${reason.stack ?? ''}` : String(reason);
+  console.error(`[assistant] unhandled rejection (kept running): ${msg.slice(0, 2000)}`);
+});
 
 async function main() {
   // Lets a restart check see which commit is running (doctor flags a mismatch).
@@ -93,6 +102,8 @@ async function main() {
     ['web-task', startWebTaskRunner],
     // Pings the Chrome extension each minute, reopens Chrome, reloads an outdated extension.
     ['chrome-health', startChromeHealth],
+    // The take-over page: this Mac's screen in the owner's phone browser (needs TAKEOVER_BASE_URL).
+    ['takeover', startTakeoverServer],
     // Follow-ups after "done" and email threads with companies, until settled.
     ['followups', startFollowups],
     // Calls/jobs the owner approved for the Family chat: post results back there.

@@ -10,7 +10,9 @@ import { proposeAction, getAction, getErrand, listErrands } from '../db.js';
 import { ownerAskedForCall } from '../lib/owner-request.js';
 import { toDialable, isFictionalNumber, isPhoneConfigured } from '../phone.js';
 import { checkActionsEnabled } from '../lib/spend-cap.js';
-import { prepareErrand, addErrandNote, extendErrand, cancelErrand, describeErrand, errandsEnabled, startCallNow } from '../errands.js';
+import { prepareErrand, addErrandNote, extendErrand, cancelErrand, describeErrand, errandsEnabled, startCallNow, isOpenAt, nextOpenTime } from '../errands.js';
+import { fmtWhen } from '../lib/job-updates.js';
+import { getBotName } from '../config.js';
 
 // Mirrors errands.ts MAX_TARGETS. Not imported: tool descriptions are built at
 // module load, and errands.ts -> phone.ts -> ... -> tools/index.ts is a cycle,
@@ -24,6 +26,16 @@ function dmFormat(id: number, summary: string): string {
 // The check lives in lib/owner-request.ts (shared with book_online); kept
 // exported here for existing callers and tests.
 export { ownerAskedForCall };
+
+const HOURS_SCHEMA = {
+  type: 'array',
+  description: 'Their opening hours (look them up with web_search, e.g. Google/Yelp/their site). The assistant only calls while they are open. Example: [{"days":"Tue-Sun","open":"5pm","close":"9:30pm"}]. Omit only if you truly cannot find them.',
+  items: {
+    type: 'object',
+    properties: { days: { type: 'string', description: '"Mon-Fri", "Sat,Sun", "daily".' }, open: { type: 'string', description: '"9am", "17:00".' }, close: { type: 'string' } },
+    required: ['days', 'open', 'close'],
+  },
+};
 
 export const errandTools: ToolDef[] = [
   {
@@ -42,7 +54,11 @@ After calling this, DM the owner the exact text returned.`,
             description: `1-${MAX_TARGETS} businesses to call, in order (first choice, then backups).`,
             items: {
               type: 'object',
-              properties: { name: { type: 'string' }, phone: { type: 'string', description: 'US phone number as found (any format).' } },
+              properties: {
+                name: { type: 'string' },
+                phone: { type: 'string', description: 'US phone number as found (any format).' },
+                hours: HOURS_SCHEMA,
+              },
               required: ['name', 'phone'],
             },
           },
@@ -93,12 +109,13 @@ Use start_errand instead when it will take calling around or several tries over 
           goal: { type: 'string', description: 'What the call must get done, in one sentence.' },
           share: { type: 'string', description: 'Exactly what the caller may tell them, with values.' },
           keep_transcript: { type: 'boolean', description: 'True only if the owner asked to keep a word-for-word record.' },
+          hours: HOURS_SCHEMA,
         },
         required: ['owner_request', 'name', 'phone', 'number_source', 'goal'],
       },
     },
     handler: async (input, context?: ToolContext) => {
-      const i = input as { owner_request: string; name: string; phone: string; number_source: string; goal: string; share?: string; keep_transcript?: boolean };
+      const i = input as { owner_request: string; name: string; phone: string; number_source: string; goal: string; share?: string; keep_transcript?: boolean; hours?: unknown };
       const enabled = checkActionsEnabled();
       if (!enabled.ok) return enabled.reason!;
       if (!errandsEnabled() || !isPhoneConfigured()) return 'Phone calling is not set up on this machine.';
@@ -124,13 +141,17 @@ Use start_errand instead when it will take calling around or several tries over 
           : `Already calling ${i.name}; added the owner's words ("${note}") to that call. Tell the owner in one line; don't start another.`;
       }
       const prepared = prepareErrand({
-        goal: i.goal, targets: [{ name: i.name, phone: dial }], share: i.share ?? '', max_calls: 2,
+        goal: i.goal, targets: [{ name: i.name, phone: dial, hours: i.hours }], share: i.share ?? '', max_calls: 2,
         keep_transcript: i.keep_transcript === true,
       });
       if ('error' in prepared) return `Not calling: ${prepared.error}`;
       const id = startCallNow(prepared.payload as unknown as Parameters<typeof startCallNow>[0], null);
       linkFamilyRequest(String(i.owner_request), { type: 'errand', id });
       const d = dial.slice(-10);
+      const hrs = (prepared.payload as { targets: Array<{ hours?: Parameters<typeof isOpenAt>[0] }> }).targets[0]?.hours;
+      if (hrs && !isOpenAt(hrs)) {
+        return `${i.name} is closed right now; ${getBotName()} will call when they open (${fmtWhen(nextOpenTime(hrs, new Date(), false))}) [errand #${id}]. Tell the owner that in one short line.`;
+      }
       return `Calling ${i.name} (${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}) now [errand #${id}]. Tell the owner in one short line, e.g. "📞 Calling ${i.name} now, I'll text you what they say."${i.keep_transcript ? '' : ' Not keeping a transcript.'}`;
     },
   },

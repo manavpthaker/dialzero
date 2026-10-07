@@ -4630,9 +4630,11 @@ export function callNotesFor(opts: { phone?: string | null; business?: string | 
 /** Errand calls placed today (local), across all errands, for the daily cap. */
 export function countErrandCallsToday(): number {
   const row = db.prepare(
-    `SELECT COUNT(*) AS n FROM errand_events WHERE type = 'dialing' AND at >= ?`
-  ).get(toSqliteDate(startOfTodayET())) as { n: number };
-  return row.n;
+    `SELECT (SELECT COUNT(*) FROM errand_events WHERE type = 'dialing' AND at >= ?)
+          - (SELECT COUNT(*) FROM errand_events WHERE type = 'phone_down' AND at >= ?) AS n`
+  ).get(toSqliteDate(startOfTodayET()), toSqliteDate(startOfTodayET())) as { n: number };
+  // Dials that never reached anyone because our own phone link was down don't count.
+  return Math.max(0, row.n);
 }
 
 // ── Wake-up calls (src/wakeup.ts) ────────────────────────────────────────────

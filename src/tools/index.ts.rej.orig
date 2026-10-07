@@ -1,0 +1,17 @@
+@@ -24,6 +24,7 @@
+ import { webTaskTools, checkDownloadsTool, enterOwnerCodeTool, openSignInLinkTool, desktopTool, fillLoginTool, fill2faTool } from './web-task.js';
+ import { jobTools } from './jobs.js';
+ import { approvalTools } from './approvals.js';
++import { receptionTools } from './reception.js';
+ import { instacartCartTools } from './instacart-cart.js';
+ import { followupTools } from './followups.js';
+ import { wakeUpTools } from './wakeup.js';
+@@ -107,7 +108,7 @@
+   messages: messagesTools,
+   recall: recallTools,
+   content: contentTools,
+-  actions: [...actionTools, ...errandTools, ...sendNowTools, ...webBookingTools, ...webTaskTools, ...jobTools, ...followupTools, ...wakeUpTools, ...approvalTools, ...instacartCartTools],
++  actions: [...actionTools, ...errandTools, ...sendNowTools, ...webBookingTools, ...webTaskTools, ...jobTools, ...followupTools, ...wakeUpTools, ...approvalTools, ...instacartCartTools, ...receptionTools],
+   // Only the booking sub-agent (web-booking.ts BOOKING_GROUP) gets these.
+   // Booking and web-task runs: the scoped browser tools, plus proof that a
+   // download landed and a web search for "how do I export/cancel on X".

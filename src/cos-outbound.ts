@@ -88,7 +88,7 @@ export interface InterruptRequest {
    * difference between this and the old sentinel, which stopped things with no
    * record that a stop had happened.
    */
-  bypass?: 'outreach' | 'operator-alarm' | 'wake-up';
+  bypass?: 'outreach' | 'operator-alarm' | 'wake-up' | 'reception-urgent';
   /** Raise (never lower) the per-kind minimum spacing for this subject. */
   cooldownMinutes?: number;
 }

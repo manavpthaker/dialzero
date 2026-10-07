@@ -215,6 +215,7 @@ async function checkThread(job: JobRow, d: FollowupDeps): Promise<void> {
   } else if (r.status === 'reply' && str(r.reply_body) && spec.replies < MAX_REPLIES) {
     await d.sendEmail({ to: spec.to, subject: /^re:/i.test(spec.subject) ? spec.subject : `Re: ${spec.subject}`, body: str(r.reply_body) });
     save({ replies: spec.replies + 1, last_sent_at: iso(now) }, now + 2 * HOUR, `They replied; answered them: ${summary}`);
+    await d.notify(`✉️ ${job.title}: ${spec.to} replied. ${summary} I answered within what you OK'd and I'm watching for their next reply.`, `email-thread:${job.id}`, 'reply');
   } else if (r.status === 'needs_owner' || (r.status === 'reply' && spec.replies >= MAX_REPLIES)) {
     const ask = str(r.ask) || summary || `${spec.to} replied and needs you.`;
     waitOnOwner(job.id, 'decision', ask);
@@ -224,10 +225,11 @@ async function checkThread(job: JobRow, d: FollowupDeps): Promise<void> {
     if (quietDays >= 3 && spec.followups === 0 && str(r.followup_body)) {
       await d.sendEmail({ to: spec.to, subject: /^re:/i.test(spec.subject) ? spec.subject : `Re: ${spec.subject}`, body: str(r.followup_body) });
       save({ followups: 1, last_sent_at: iso(now) }, now + 4 * HOUR, 'No reply in 3 business days; sent a follow-up.');
+      await d.notify(`✉️ ${job.title}: no reply from ${spec.to} in 3 business days, so I sent one follow-up. If they stay quiet I'll ask whether to call.`, `email-thread:${job.id}`, 'reply');
     } else if (quietDays >= 3 && spec.followups >= 1) {
       const ask = `No reply from ${spec.to} after two emails. Want me to call them instead?`;
       waitOnOwner(job.id, 'decision', ask);
-      await d.notify(ask, `email-thread:${job.id}`, 'decision');
+      await d.notify(ask, `email-thread:${job.id}`, 'reply');
     } else {
       save({}, now + 2 * HOUR);
     }

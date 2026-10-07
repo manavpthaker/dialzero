@@ -29,6 +29,9 @@ import { getBotName, getOwner, getTimezone, ownerRef } from './config.js';
 import { addInteraction, getPersonHandles, setMemory, saveMessage, type Action } from './db.js';
 import { resolvePerson } from './tools/outbound-send.js';
 import { sendInterrupt } from './cos-outbound.js';
+import {
+  lookupCaller, connectDecision, deliverMessage, logConnected, logDeclined, type ReceptionCaller,
+} from './reception.js';
 
 const env = (k: string, d = '') => (process.env[k] ?? d).trim();
 const PORT = Number(env('PHONE_PORT', '4011'));
@@ -71,10 +74,18 @@ type ErrandCall = {
   menuLog?: string[];
   /** When the phone line first connected, so the max-length cap spans menu hops. */
   lineStartedAt?: number;
+  /** Conference mode: the business and the assistant's voice share a Twilio conference, so key presses don't drop the session. */
+  conf?: { token: string; name: string };
   /** The business called the bot's number back about this errand (inbound). */
   callback?: boolean;
   /** Callbacks only: what has happened on the errand so far, one line each. */
   history?: string[];
+  /** Someone else called the assistant's number: it acts as the receptionist (src/reception.ts). */
+  reception?: {
+    caller: ReceptionCaller;
+    /** The assistant tried to put them through and the owner didn't pick up; take a message now. */
+    missed?: { name: string; reason: string };
+  };
 };
 
 const MAX_KEY_PRESSES = 8;
@@ -275,6 +286,137 @@ async function pressKeys(call: ErrandCall & { twilioSid?: string }, digits: stri
   }
 }
 
+// ── Reception: ring the owner, announce, press 1 to take it ─────────────────
+
+interface Transfer { call: ErrandCall & { twilioSid?: string }; name: string; reason: string; accepted: boolean; expires: number }
+const transfers = new Map<string, Transfer>();
+const xml = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const stepUrl = (step: string, token: string) => xml(`${PUBLIC_URL}/twilio/voice?step=${step}&t=${token}`);
+
+/** Redirect the caller's line to ring the owner's cell; they hear who it is and press 1 to take it. */
+async function connectOwner(call: ErrandCall & { twilioSid?: string }, name: string, reason: string): Promise<void> {
+  if (!call.twilioSid) throw new Error('no caller line to transfer');
+  const ownerCell = ownerPhones()[0];
+  if (!ownerCell) throw new Error('no owner number');
+  const now = Date.now();
+  for (const [k, v] of transfers) if (v.expires < now) transfers.delete(k);
+  const token = randomBytes(12).toString('base64url');
+  transfers.set(token, { call, name, reason, accepted: false, expires: now + 10 * 60_000 });
+  // The owner sees the caller's own number when there is one.
+  const callerId = call.to || TWILIO_NUMBER;
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial timeout="25" callerId="${xml(callerId)}" action="${stepUrl('after', token)}"><Number url="${stepUrl('whisper', token)}">+1${ownerCell}</Number></Dial></Response>`;
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls/${call.twilioSid}.json`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ Twiml: twiml }),
+  });
+  if (!res.ok) {
+    transfers.delete(token);
+    throw new Error(`Twilio redirect ${res.status}`);
+  }
+}
+
+// ── Conference calls: key presses without dropping the assistant's voice ────
+// OpenAI's realtime SIP can hear keypad tones but not send them, and pressKeys
+// (redirect the call, play tones, dial a fresh session) left the business's menu
+// talking to silence for several seconds; most menus then hung up. In conference
+// mode the business leg and the assistant's SIP leg sit in one Twilio conference; a key
+// press is a conference announcement of <Play digits>, and the session never ends.
+
+interface Conf { nonce: string; name: string; sid?: string; sipStarted: boolean; expires: number }
+const confs = new Map<string, Conf>();
+const rawStepUrl = (step: string, token: string, extra = '') => `${PUBLIC_URL}/twilio/voice?step=${step}&t=${token}${extra}`;
+
+export function conferenceMode(): boolean { return env('PHONE_CONFERENCE', 'true') !== 'false'; }
+
+async function twilioPost(path: string, params: Record<string, string>): Promise<Record<string, unknown>> {
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams(params),
+  });
+  const json = await res.json().catch(() => ({})) as Record<string, unknown>;
+  if (!res.ok) throw new Error(`Twilio ${path} ${res.status}: ${String(json.message ?? '').slice(0, 160)}`);
+  return json;
+}
+
+/** TwiML that puts the business into a fresh conference and tells us when they're in. */
+function conferenceTwiml(token: string, name: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true" waitUrl="" statusCallback="${xml(rawStepUrl('conf', token))}" statusCallbackEvent="join">${xml(name)}</Conference></Dial></Response>`;
+}
+
+/** Twilio status callbacks and announcements for conference calls. */
+export async function conferenceStep(step: string, token: string, params: URLSearchParams): Promise<string> {
+  const empty = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
+  const c = confs.get(token);
+  if (!c) return empty;
+  if (step === 'dtmf') {
+    const d = (params.get('d') || '').replace(/[^0-9*#wW]/g, '').slice(0, 20);
+    return d ? `<?xml version="1.0" encoding="UTF-8"?><Response><Play digits="w${d}"/></Response>` : empty;
+  }
+  if (step === 'conf' && params.get('StatusCallbackEvent') === 'participant-join' && !c.sipStarted) {
+    // The business picked up and is in the conference: bring the assistant's voice in.
+    c.sipStarted = true;
+    c.sid = params.get('ConferenceSid') || undefined;
+    const uri = `sip:${OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-Assistant-Nonce=${c.nonce}`;
+    const join = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial><Conference beep="false" endConferenceOnExit="true">${xml(c.name)}</Conference></Dial></Response>`;
+    twilioPost('Calls.json', { To: uri, From: TWILIO_NUMBER, Twiml: join }).catch((err) => console.error('[phone] conference: could not bring the assistant in:', err.message));
+  }
+  return empty;
+}
+
+/** Press keys inside a conference call: Twilio plays the tones to everyone, the session keeps going. */
+async function pressKeysInConference(call: ErrandCall, digits: string): Promise<void> {
+  const c = call.conf ? confs.get(call.conf.token) : undefined;
+  if (!c?.sid) throw new Error('no conference to play the keys into');
+  await twilioPost(`Conferences/${c.sid}.json`, { AnnounceUrl: rawStepUrl('dtmf', call.conf!.token, `&d=${encodeURIComponent(digits)}`), AnnounceMethod: 'POST' });
+}
+
+/** Tests only: stage a transfer as if connectOwner had redirected the caller. */
+export function stageTransferForTest(token: string, name: string, reason: string, caller: ReceptionCaller): void {
+  transfers.set(token, {
+    call: { kind: 'errand', reception: { caller }, actionId: 0, to: caller.phone ? `+1${caller.phone}` : '', name, personId: null, goal: '', context: '', keepTranscript: false, twilioSid: 'CAtest' },
+    name, reason, accepted: false, expires: Date.now() + 60_000,
+  });
+}
+
+/** The extra steps of a reception transfer, all on /twilio/voice (the path the public URL already exposes). */
+export function receptionStep(step: string, token: string, params: URLSearchParams): string {
+  const t = transfers.get(token);
+  const empty = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
+  const hangup = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+  if (!t) return hangup;
+  if (step === 'whisper') {
+    // Played to the owner only. A voicemail never presses 1, so the caller comes back to the assistant.
+    const say = `${t.name}${t.reason ? `, about ${t.reason}` : ''}. Press 1 to take it.`;
+    return `<?xml version="1.0" encoding="UTF-8"?><Response><Gather numDigits="1" timeout="8" action="${stepUrl('accept', token)}"><Say>${xml(say)}</Say></Gather><Hangup/></Response>`;
+  }
+  if (step === 'accept') {
+    if (params.get('Digits') === '1') { t.accepted = true; return empty; }
+    return hangup;
+  }
+  if (step === 'after') {
+    const r = t.call.reception;
+    transfers.delete(token);
+    if (t.accepted) {
+      if (r) logConnected(r.caller, t.name, t.reason);
+      return hangup;
+    }
+    // The owner didn't take it: back to the assistant to take a message.
+    const nonce = mintNonce({ ...t.call, reception: r ? { caller: r.caller, missed: { name: t.name, reason: t.reason } } : undefined, lineStartedAt: undefined });
+    const entry = pending.get(nonce);
+    if (entry) entry.twilioSid = params.get('CallSid') || t.call.twilioSid;
+    return sipTwiml(nonce);
+  }
+  return hangup;
+}
+
 function sayTwiml(text: string): string {
   const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${esc}</Say><Hangup/></Response>`;
@@ -347,6 +489,18 @@ function handleInboundCall(req: IncomingMessage, params: URLSearchParams): strin
         kind: 'errand', callback: true, actionId: 0, to: `+1${from}`, name: match.name, personId: null,
         goal: [match.goal, match.notes.length ? `Owner's latest instructions: ${match.notes.join(' ')}` : ''].filter(Boolean).join('\n'),
         context: match.share, keepTranscript: match.keepTranscript, errandId: match.errandId, history: match.history,
+      });
+      const entry = pending.get(nonce);
+      const sid = params.get('CallSid');
+      if (entry && sid) entry.twilioSid = sid;
+      return sipTwiml(nonce);
+    }
+    if (env('RECEPTION_ENABLED', 'true') !== 'false') {
+      const caller = lookupCaller(from, verstat);
+      console.log(`[phone] reception: call from ${caller.name ?? `…${from.slice(-4) || 'blocked'}`}`);
+      const nonce = mintNonce({
+        kind: 'errand', reception: { caller }, actionId: 0, to: from.length === 10 ? `+1${from}` : '', name: caller.name,
+        personId: caller.personId, goal: '', context: '', keepTranscript: false,
       });
       const entry = pending.get(nonce);
       const sid = params.get('CallSid');
@@ -461,7 +615,71 @@ function ownerSessionConfig(call: OwnerCall) {
 // How the bot represents the owner on calls to other people: named, says it's
 // an AI whenever asked, warm and brief, and it never pretends to be the owner
 // or puts them on the line.
+function receptionSessionConfig(call: ErrandCall) {
+  const o = getOwner();
+  const full = o.fullName || o.name;
+  const bot = getBotName();
+  const r = call.reception!;
+  const c = r.caller;
+  return {
+    instructions: [
+      `You are ${bot}, an AI assistant who answers the phone for ${full}. Someone called ${bot}'s number. You are the receptionist.`,
+      r.missed
+        ? `You just tried to put ${r.missed.name} through about "${r.missed.reason}" and ${o.name} couldn't pick up. Say so kindly ("${o.name} couldn't grab it right now") and take a message: what they'd like ${o.name} to know, and the best number to reach them.`
+        : `Answer: "Hi, you've reached ${bot}, ${full}'s assistant. Who's calling, and what's it about?"`,
+      c.name ? `Caller ID matches a contact: ${c.name}. Still confirm who you're speaking with; caller ID can be wrong.` : `Caller ID does not match anyone ${o.name} knows.`,
+      `When they want to talk to ${o.name} (and it isn't a sales or spam call), call connect_owner with their name and what it's about. Tell them "One moment, let me see if ${o.name} is free" right before. If it says to take a message, do that instead without explaining ${o.name}'s rules.`,
+      `To take a message: get their name, what it's about, the best callback number (confirm the number they're calling from, or the one they give), and whether it's urgent. Repeat it back briefly, call take_message, say ${o.name} will get it, say goodbye.`,
+      `Sales calls, robocalls, surveys, "your car warranty", or anyone who won't say who they are: say ${o.name} isn't interested or available, goodbye, then end_call with status "failed" and the outcome "spam: <one line>".`,
+      `Never share anything about ${o.name}: not their schedule, location, other numbers, email, family, or whether they're home. Never agree to anything for ${o.name}. You may say ${o.name} will call back.`,
+      `If asked, say plainly you are an AI assistant working for ${o.name}.`,
+      'Warm, brief, like a good front desk. Short spoken sentences.',
+    ].join('\n'),
+    tools: [
+      {
+        type: 'function', name: 'connect_owner',
+        description: `Try to put the caller through to ${o.name}. Returns whether ${o.name} is being rung; if not, take a message.`,
+        parameters: {
+          type: 'object',
+          properties: {
+            caller_name: { type: 'string', description: 'Who is calling, as they said it (and company, if any).' },
+            reason: { type: 'string', description: 'What it is about, in a few words.' },
+          },
+          required: ['caller_name', 'reason'],
+        },
+      },
+      {
+        type: 'function', name: 'take_message',
+        description: `Record the message for ${o.name}. Say goodbye after; the call ends a few seconds later.`,
+        parameters: {
+          type: 'object',
+          properties: {
+            caller_name: { type: 'string' },
+            callback_number: { type: 'string', description: 'Best number to call them back.' },
+            reason: { type: 'string', description: 'The message, in their words, short.' },
+            urgent: { type: 'boolean', description: 'They said it is urgent or time-sensitive.' },
+          },
+          required: ['caller_name', 'reason'],
+        },
+      },
+      {
+        type: 'function', name: 'end_call',
+        description: 'End a call with no message (spam, sales, wrong number, they hung up on you). Say goodbye first.',
+        parameters: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['failed', 'done'] },
+            outcome: { type: 'string', description: 'One line: what it was.' },
+          },
+          required: ['status', 'outcome'],
+        },
+      },
+    ],
+  };
+}
+
 function errandSessionConfig(call: ErrandCall) {
+  if (call.reception) return receptionSessionConfig(call);
   const o = getOwner();
   const owner = o.name;
   const full = o.fullName || o.name;
@@ -484,8 +702,10 @@ function errandSessionConfig(call: ErrandCall) {
         ? /message|voice ?mail|leave|record/i.test(call.menuLog.at(-1) ?? '')
           ? `This call is already in progress. You chose the option to leave a message (${call.menuLog.join('; ')}). After the beep, or as soon as it goes quiet, leave your one short message now, then call end_call with status "voicemail".`
           : `This call is already in progress. You are working through their automated phone menu; so far: ${call.menuLog.join('; ')}. Listen to what comes next. Only introduce yourself once a person answers or a voicemail beep sounds. If no one comes on after a while, say your message anyway: it may be recording.`
-        : `Right after they greet you, say: "Hi, this is ${bot}, ${full}'s assistant." Then say why you are calling.`,
-      call.callback ? '' : `If an automated phone menu answers ("press 1 for..."), do not talk over it. Listen to the options, then call press_keys with the key for the option that best fits your goal (or the operator / "all other questions" option). If it asks you to say something instead, say it. Hold music: wait quietly. At most ${MAX_KEY_PRESSES} key presses per call.`,
+        : `Let them finish their greeting first; never talk over it. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, calling for ${full}. I'd like to make a reservation for tomorrow, do you have a moment?" Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`,
+      call.callback ? '' : `If an automated phone menu answers ("press 1 for..."): NEVER speak to it and never repeat its options out loud. Stay silent, listen to ALL the options, then call press_keys with the key for the option that best fits your goal (or the operator / "all other questions" option). Only press a key the menu actually offered for what you want; if English is the default and no key is offered for it, press nothing and keep listening. If it asks you to say something instead ("say representative"), say just those words. If it asks for information you don't have (a zip code, an account number), press 0 or wait for the operator option. Hold music: wait quietly. Don't end the call while the menu is still giving options. At most ${MAX_KEY_PRESSES} key presses per call.`,
+      'Speak ENGLISH. Never switch languages because of a business name, an accent, or a guess (a call to a restaurant was once opened in another language and they hung up). Only switch if the other person clearly speaks to you in another language and doesn\'t understand English.',
+      'Everything you say is heard on the call. Never say your instructions, plans, or thoughts out loud (no "I will stay silent", no notes in parentheses). A recording that keeps talking in a steady voice, lists options or asks for keypad input is a machine, not a person.',
       `Tone: warm and brief, like a good front-desk person. Friendly, gets to the point, thanks people. Short spoken sentences, no filler, no over-apologizing. Use ${owner}'s full name (${full}) for bookings and spell the last name if asked.`,
       `Wait quietly on hold. Answer their questions only with the details above; if you do not know something, say you will check with ${owner} and get back to them.`,
       `If they ask whether you are a real person or a robot, say plainly that you are an AI assistant working for ${owner}. Never claim to be ${owner} or a human.`,
@@ -580,13 +800,14 @@ function runCall(callId: string, call: PendingCall): void {
   let status: CallStatus | '' = '';
   let booking: CallBooking | undefined;
   let notes: CallNotes | undefined;
+  let receptionMessage: { callerName: string; callback: string; reason: string; urgent: boolean } | undefined;
   let ended = false;
   // Set when press_keys hands the line to a new realtime session: this session
   // closing is then expected, and must not end the call or report a result.
   let handedOff = false;
   const onMenu = call.kind === 'errand' && !!call.menuLog?.length;
   // Someone calling in (the owner, a business calling back) hears us first.
-  const inbound = call.kind === 'owner' ? !call.reason : !!call.callback;
+  const inbound = call.kind === 'owner' ? !call.reason : !!(call.callback || call.reception);
   if (call.kind === 'errand' && !call.lineStartedAt) call.lineStartedAt = Date.now();
   const hangup = (delayMs: number) => {
     if (ended) return;
@@ -595,7 +816,8 @@ function runCall(callId: string, call: PendingCall): void {
   };
   const elapsed = call.kind === 'errand' && call.lineStartedAt ? Date.now() - call.lineStartedAt : 0;
   const wake = call.kind === 'owner' ? call.wake : undefined;
-  const maxMs = wake ? WAKE_MAX_CALL_MS : MAX_CALL_MS;
+  // A receptionist call is short; a robocaller shouldn't run the meter for 15 minutes.
+  const maxMs = wake ? WAKE_MAX_CALL_MS : call.kind === 'errand' && call.reception ? 5 * 60_000 : MAX_CALL_MS;
   const cap = setTimeout(() => { console.warn(`[phone] ${callId} hit max length`); hangup(0); }, Math.max(30_000, maxMs - elapsed));
   // Wake-up calls: real spoken owner answers, and whether the model asked to confirm.
   let wakeAnswers = 0;
@@ -617,7 +839,10 @@ function runCall(callId: string, call: PendingCall): void {
   // seconds.
   const lastPress = call.kind === 'errand' ? call.menuLog?.at(-1) ?? '' : '';
   const toMessage = onMenu && /message|voice ?mail|leave|record/i.test(lastPress);
-  const speakAfterMs = !onMenu ? 10_000 : toMessage ? 5_000 : 45_000;
+  // After a key press, 45s of waiting lost calls: some lines beep into voicemail
+  // and hang up on silence after ~20s. Speak at 15s;
+  // if it's hold music the message just repeats when a person picks up.
+  const speakAfterMs = !onMenu ? 10_000 : toMessage ? 5_000 : 15_000;
   const speakFirst = call.kind === 'errand' && !inbound
     ? setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, speakAfterMs)
     : undefined;
@@ -651,6 +876,10 @@ function runCall(callId: string, call: PendingCall): void {
     if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
       transcript.push(`${call.kind === 'owner' ? 'You' : 'Them'}: ${String(ev.transcript).trim()}`);
       if (wake && isRealWakeAnswer(String(ev.transcript))) wakeAnswers++;
+    } else if (ev.type === 'response.created' || ev.type === 'input_audio_buffer.speech_started') {
+      // A response is already coming (or they're talking): the speak-first timer must
+      // not start a second one. That race made the assistant say its intro twice.
+      botSpoke = true;
     } else if (ev.type === 'response.output_audio_transcript.done' && ev.transcript) {
       botSpoke = true;
       transcript.push(`Bot: ${String(ev.transcript).trim()}`);
@@ -666,6 +895,16 @@ function runCall(callId: string, call: PendingCall): void {
           output = 'Only 0-9, * and # can be pressed.';
         } else if ((call.menuLog?.length ?? 0) >= MAX_KEY_PRESSES) {
           output = 'Too many key presses on this call. End the call with retry_later and say the menu could not be navigated.';
+        } else if (call.conf) {
+          // Conference call: the tones play into the call and this session keeps listening.
+          try {
+            await pressKeysInConference(call, digits);
+            call.menuLog = [...(call.menuLog ?? []), `Pressed ${digits}${args.reason ? ` (${String(args.reason)})` : ''}`];
+            console.log(`[phone] ${callId}: pressed ${digits} (conference)`);
+            output = `Pressed ${digits}. Stay quiet and listen to what comes next: another menu (press again), hold music (wait), a person (introduce yourself briefly), or a beep (leave your short message).`;
+          } catch (err) {
+            output = `Could not press keys: ${err instanceof Error ? err.message : String(err)}`;
+          }
         } else {
           try {
             handedOff = true;
@@ -677,6 +916,28 @@ function runCall(callId: string, call: PendingCall): void {
             output = `Could not press keys: ${err instanceof Error ? err.message : String(err)}`;
           }
         }
+      } else if (ev.name === 'connect_owner' && call.kind === 'errand' && call.reception) {
+        const decision = connectDecision(call.reception.caller);
+        if (!decision.ok) {
+          output = decision.why;
+        } else {
+          try {
+            handedOff = true;
+            await connectOwner(call, String(args.caller_name || call.reception.caller.name || 'Someone'), String(args.reason || ''));
+            console.log(`[phone] ${callId}: reception ringing the owner`);
+            return; // the caller's line is now ringing the owner; this session ends
+          } catch (err) {
+            handedOff = false;
+            output = `Couldn't ring the owner (${err instanceof Error ? err.message : String(err)}). Take a message.`;
+          }
+        }
+      } else if (ev.name === 'take_message' && call.kind === 'errand' && call.reception) {
+        receptionMessage = {
+          callerName: String(args.caller_name || ''), callback: String(args.callback_number || ''),
+          reason: String(args.reason || ''), urgent: args.urgent === true,
+        };
+        output = `Saved. Tell them ${getOwner().name} will get it, say goodbye.`;
+        hangup(6000);
       } else if (ev.name === 'confirm_awake' && wake) {
         wakeConfirmAsked = true;
         // Transcription can trail the audio by a turn; the count is rechecked when the call ends.
@@ -720,7 +981,7 @@ function runCall(callId: string, call: PendingCall): void {
     if (wake) {
       try { wakeHooks?.onFinished(wake.id, wake.attempt, { awake: isAwake(), answers: wakeAnswers }); } catch (err) { console.error('[phone] wake hook failed:', err); }
     }
-    finishCall(callId, call, transcript, outcome, followUp, status, booking, notes).catch((err) => console.error('[phone] wrap-up failed:', err));
+    finishCall(callId, call, transcript, outcome, followUp, status, booking, notes, receptionMessage).catch((err) => console.error('[phone] wrap-up failed:', err));
   });
 }
 
@@ -728,7 +989,16 @@ async function finishCall(
   callId: string, call: PendingCall, transcript: string[], outcome: string, followUp: string, status: CallStatus | '',
   booking?: CallBooking,
   notes?: CallNotes,
+  receptionMessage?: { callerName: string; callback: string; reason: string; urgent: boolean },
 ): Promise<void> {
+  if (call.kind === 'errand' && call.reception) {
+    // Reception calls never reach errands or the one-off path.
+    const r = call.reception;
+    if (receptionMessage) await deliverMessage(r.caller, receptionMessage, { triedToConnect: !!r.missed });
+    else if (r.missed) await deliverMessage(r.caller, { callerName: r.missed.name, callback: '', reason: r.missed.reason, urgent: false }, { triedToConnect: true });
+    else if (transcript.length) await logDeclined(r.caller, outcome);
+    return;
+  }
   const keep = call.kind === 'owner' || call.keepTranscript;
   if (keep && transcript.length) setMemory('phone', `call_${todayET()}_${callId.slice(-8)}`, transcript.join('\n').slice(0, 20_000));
   // A call with the assistant continues by text: the conversation goes into the
@@ -741,7 +1011,8 @@ async function finishCall(
     } catch { /* history is best-effort */ }
   }
   if (call.kind !== 'errand') return;
-  const tail = keep ? transcript.slice(-6).join('\n') : '';
+  // Last lines of the call (their side included), so a dropped call says what happened.
+  const tail = keep ? transcript.slice(-6).join('\n') : transcript.slice(-8).join('\n').slice(-1200);
   if (call.personId) {
     try {
       addInteraction({ person_id: call.personId, channel: 'phone', summary: outcome || call.goal, ref: `call:${callId}`, occurred_at: new Date().toISOString() });
@@ -782,6 +1053,9 @@ async function finishCall(
 async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<void> {
   if (!openaiSignatureOk(req, body)) throw Object.assign(new Error('bad webhook signature'), { status: 401 });
   const ev = JSON.parse(body) as { type?: string; data?: { call_id?: string; sip_headers?: Array<{ name: string; value: string }> } };
+  // One line per delivered event, so "is OpenAI reaching us?" is answerable from the log.
+  console.log(`[phone] webhook received: ${ev.type ?? 'unknown'}`);
+  setMemory('phone', 'last_webhook_at', new Date().toISOString());
   if (ev.type !== 'realtime.call.incoming') return;
   const callId = ev.data?.call_id;
   if (!callId) return;
@@ -797,9 +1071,9 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
   // A callback isn't one of the runner's own dials, so it leaves call_state alone.
   if (call.kind === 'errand' && call.errandId && errandHooks && !call.callback) errandHooks.onConnected(call.errandId);
   if (call.kind === 'owner' && call.wake) wakeHooks?.onConnected(call.wake.id, call.wake.attempt);
-  // Calls to other people are outcome-only unless the owner asked for a transcript:
-  // their side is not transcribed at all, so nothing word-for-word exists to store.
-  const transcribeThem = call.kind === 'owner' || call.keepTranscript;
+  // Their side is transcribed too, so a dropped call can say why. The full transcript
+  // is still only stored when the owner asks ("keep transcript"); otherwise just the last few lines go into the call log.
+  const transcribeThem = call.kind === 'owner' || call.keepTranscript || (call.kind === 'errand' && env('PHONE_TRANSCRIBE_THEM', 'true') !== 'false');
   await callApi(callId, 'accept', {
     type: 'realtime',
     model: MODEL,
@@ -907,7 +1181,7 @@ export async function runPlaceCall(action: Action): Promise<{ outcome: string; a
 /** Dial one errand step. The result comes back through setErrandCallHooks. */
 export async function placeErrandCall(c: {
   errandId: number; actionId: number; to: string; name: string | null; goal: string; context: string; keepTranscript: boolean;
-}): Promise<void> {
+}): Promise<string> {
   if (!isPhoneConfigured()) throw new Error('phone calling is not configured');
   const to = toDialable(c.to);
   if (!to) throw new Error(`"${c.to}" is not a dialable US number`);
@@ -916,9 +1190,32 @@ export async function placeErrandCall(c: {
     name: c.name, personId: null, keepTranscript: c.keepTranscript, errandId: c.errandId,
   });
   const entry = pending.get(nonce);
-  const sid = await twilioCall(to, nonce);
+  let extra: Record<string, string> = {};
+  if (conferenceMode() && entry && entry.kind === 'errand') {
+    const token = randomBytes(12).toString('base64url');
+    const name = `call-${token.slice(0, 12)}`;
+    confs.set(token, { nonce, name, sipStarted: false, expires: Date.now() + 30 * 60_000 });
+    for (const [k, v] of confs) if (v.expires < Date.now()) confs.delete(k);
+    entry.conf = { token, name };
+    extra = { Twiml: conferenceTwiml(token, name) };
+  }
+  const sid = await twilioCall(to, nonce, extra);
   // Same object runCall gets, even if the webhook already consumed the nonce.
   if (entry) entry.twilioSid = sid;
+  return sid;
+}
+
+/** Twilio's view of a call leg: status (queued|ringing|in-progress|completed|busy|no-answer|failed|canceled) and seconds. */
+export async function twilioCallInfo(sid: string): Promise<{ status: string; duration: number } | null> {
+  if (!TWILIO_SID || !TWILIO_TOKEN || !sid) return null;
+  try {
+    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls/${sid}.json`, {
+      headers: { Authorization: `Basic ${Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64')}` },
+    });
+    if (!res.ok) return null;
+    const d = await res.json() as { status?: string; duration?: string | null };
+    return { status: d.status ?? '', duration: Number(d.duration ?? 0) || 0 };
+  } catch { return null; }
 }
 
 // ── HTTP server ──────────────────────────────────────────────────────────────
@@ -942,7 +1239,19 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (req.method !== 'POST') { res.writeHead(404).end(); return; }
   const body = await readBody(req);
   if (path === '/twilio/voice') {
-    const twiml = handleInboundCall(req, new URLSearchParams(body));
+    const query = new URLSearchParams(req.url?.split('?')[1] ?? '');
+    const params = new URLSearchParams(body);
+    const step = query.get('step');
+    if (step) {
+      if (!twilioSignatureOk(req, params)) throw Object.assign(new Error('bad twilio signature'), { status: 403 });
+      const allParams = new URLSearchParams([...params, ...query]);
+      const out = step === 'conf' || step === 'dtmf'
+        ? await conferenceStep(step, query.get('t') || '', allParams)
+        : receptionStep(step, query.get('t') || '', params);
+      res.writeHead(200, { 'Content-Type': 'text/xml' }).end(out);
+      return;
+    }
+    const twiml = handleInboundCall(req, params);
     res.writeHead(200, { 'Content-Type': 'text/xml' }).end(twiml);
     return;
   }

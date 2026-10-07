@@ -24,6 +24,8 @@ import { webTaskTools, checkDownloadsTool, enterOwnerCodeTool, openSignInLinkToo
 import { jobTools } from './jobs.js';
 import { followupTools } from './followups.js';
 import { wakeUpTools } from './wakeup.js';
+import { receptionTools } from './reception.js';
+import { rideTools } from './rides.js';
 import { computerUseTools } from './computer-use.js';
 import { notionTools } from './notion.js';
 import { familyCalendarTools } from './family-calendar.js';
@@ -101,8 +103,8 @@ export const toolRegistry: Record<string, ToolDef[]> = {
   recall: recallTools,
   // Split by feature module (src/modules.ts) so each can be switched off alone.
   actions: [...actionTools, ...sendNowTools, ...jobTools, ...followupTools, ...familyRequestOwnerTools],
-  errands: [...errandTools, ...wakeUpTools],
-  'web-booking': [...webBookingTools, ...webTaskTools, ...instacartCartTools],
+  errands: [...errandTools, ...wakeUpTools, ...receptionTools],
+  'web-booking': [...webBookingTools, ...webTaskTools, ...instacartCartTools, ...rideTools],
   // Only the booking sub-agent (web-booking.ts BOOKING_GROUP) gets these.
   // Booking and website-job runs: the scoped browser tools, plus proof that a
   // download landed and a web search for "how do I export/cancel on X".

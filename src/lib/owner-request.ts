@@ -38,7 +38,7 @@ export function ownerAskedForCall(quote: string, context?: ToolContext): boolean
   return ownerAsked(quote, context, CALL_WORDS);
 }
 
-const WEB_TASK_WORDS = /\b(instacart|cart|groceries|grocery|cancel|unsubscribe|export|download|close|turn off|opt out|return|refund|change|update|switch|renew|sign up|sign (me|us) up|pause|delete|remove|log ?in|online|website|site|account|settings)\b/i;
+const WEB_TASK_WORDS = /\b(instacart|cart|groceries|grocery|uber|lyft|ride|car to|pick me up|pickup|cancel|unsubscribe|export|download|close|turn off|opt out|return|refund|change|update|switch|renew|sign up|sign (me|us) up|pause|delete|remove|log ?in|online|website|site|account|settings)\b/i;
 
 /** The owner's own words asking for something done on a website (cancel, export, change a setting...). */
 export function ownerAskedForWebTask(quote: string, context?: ToolContext): boolean {
