@@ -4,6 +4,8 @@
 
 It's not an app you open. It's a contact in your phone.
 
+**[▶ Watch a 40-second demo](docs/media/demo.mp4)**: two real errands from the author's own texts. It calls a cafe about the wait, and when an online booking fails, it asks before calling the restaurant instead. Business names changed.
+
 - **You own the part that knows you.** Your memories, people and messages stay in one file on your Mac. Nothing is stored on anyone else's server except the AI model's normal processing of each request.
 - **A chatbot waits for you. An assistant comes back to you.** Two short check-ins a day, a nudge when something's slipping, quiet the rest of the time.
 - **It asks before it spends or commits.** Anything that costs money or speaks for you in a way you didn't ask for waits for your "go".
