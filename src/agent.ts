@@ -958,6 +958,7 @@ export async function runAgent(
           userId: user.id,
           turnId,
           currentMessage: userMessage,
+          systemAuthored: systemAuthored || undefined,
           recentMessages: [...familyHistory, ...sameRunFamilyCalendarReads],
           recipient,
           chatId: recipient,

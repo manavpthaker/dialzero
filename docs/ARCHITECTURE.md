@@ -12,10 +12,13 @@ The full, authoritative tour is in [`CLAUDE.md`](../CLAUDE.md). This is the shor
 2. **`user-resolver.ts`** maps the sender handle → a `User` (name, tone, allowed groups),
    built from `config/profile.json`.
 3. **`group-resolver.ts`** maps the chat → a `GroupConfig` (its tools + context path). DMs
-   fall through to a full-access admin context.
-4. **`router.ts`** classifies the message `sync` vs `async` (a low-cost OpenAI call with a
+   map to the admin context, but only after step 2: a sender who isn't in the profile is
+   dropped silently in `index.ts`, and a profile user without `admin` in `allowedGroups`
+   gets a redirect, not the admin tools.
+4. **`router.ts`** classifies the message `sync` vs `async` (a low-cost model call with a
    regex fallback). Async work runs in the background.
-5. **`agent.ts`** runs the OpenAI Responses tool-use loop with a per-group scoped tool set and a
+5. **`agent.ts`** runs the tool-use loop (written to the OpenAI Responses shape; `lib/openai.ts`
+   hands every call to Claude instead when `LLM_PROVIDER=claude`) with a per-group scoped tool set and a
    system prompt assembled by **`context-resolver.ts`**.
 
 ## The system prompt

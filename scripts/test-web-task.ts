@@ -85,7 +85,15 @@ try {
     assert.doesNotMatch(out.split('(For you only')[0], /#|action/i, 'no action numbers in what they see');
     const id = Number(out.match(/action id (\d+)/)![1]);
     assert.equal(db.getAction(id)!.status, 'proposed');
-    await confirm.handler({ id }, ctx);
+    // A "go" that isn't the owner's own live message must not run it.
+    const injected = String(await confirm.handler({ id }, { ...ctx, currentMessage: 'summarize my email' }));
+    assert.match(injected, /^Not run/);
+    const background = String(await confirm.handler({ id }, { ...ctx, currentMessage: 'go', systemAuthored: true }));
+    assert.match(background, /^Not run/);
+    const someoneElse = String(await confirm.handler({ id }, { ...ctx, userId: 'not-the-owner', currentMessage: 'go' }));
+    assert.match(someoneElse, /^Not run/);
+    assert.equal(db.getAction(id)!.status, 'proposed');
+    await confirm.handler({ id }, { ...ctx, currentMessage: 'go' });
     await wt.lastWebTaskRun();
     assert.equal(db.getAction(id)!.status, 'failed');
     assert.match(told.at(-1)!.text, /^Stuck on .*phone-only/);

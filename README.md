@@ -95,6 +95,12 @@ Honest list, compared with commercial assistants like Meta's Muse or Instinct:
 
 Read [docs/PRIVACY.md](docs/PRIVACY.md). Short version: everything it knows lives on your Mac; your messages and requests go to the AI provider you chose (Anthropic or OpenAI) to be understood; texts, emails, calls and bookings only happen when you ask or approve; you can see and delete everything it remembers from a local dashboard.
 
+## Security
+
+- **Who it listens to.** Only the phone numbers and emails in your profile. A text from anyone else is ignored without a reply. Family members you add get only the Family chat, never your full assistant.
+- **What a malicious email or web page can do.** It reads email and websites, so assume some of that text will try to give it orders. Anything that spends money or speaks for you (a text, an email, a call, a booking) is staged first and runs only on your own "go" in a message you sent. That check is in the code, not just the prompt: a "go" inside an email, a web page or a background job is refused. Things you asked for directly ("tell Sam I'm late") count as your go, and only when your own recent message says so. That is the protection. It doesn't stop the assistant from misreading something; it stops it from acting on it without you.
+- **Claude or OpenAI.** Set `LLM_PROVIDER` to `claude` or `openai`. The code calls one adapter (`src/lib/openai.ts`) that sends every model call to the provider you picked. Phone calls always use OpenAI's voice model.
+
 ## Build your own
 
 Take the parts you want. Every feature is a module you can turn on or off, and adding your own is documented in [docs/BUILD-YOUR-OWN.md](docs/BUILD-YOUR-OWN.md).

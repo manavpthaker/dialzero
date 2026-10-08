@@ -58,6 +58,8 @@ export interface ToolContext {
   sourceMessageGuid?: string | null;
   /** Exact text from the current inbound message, never prior conversation. */
   currentMessage?: string;
+  /** True when a scheduler, pulse or daemon authored this run (not a live message). */
+  systemAuthored?: boolean;
   /** Timestamped, Family-only transcript used for bounded shared continuations. */
   recentMessages?: ReadonlyArray<Pick<MessageRow, 'role' | 'content' | 'created_at'>>;
   /** The iMessage handle (phone/email for a DM, chat id for a group) to reply to.
