@@ -40,6 +40,10 @@ interface RawExtraction {
 
 export interface IMessageHistoryRunOptions {
   before: string;
+  /** Optional lower bound: only texts at/after this time. */
+  after?: string;
+  /** Run on this OpenAI model instead of the local one (2026-10-08: Ollama removed). */
+  model?: string;
   batchSize?: number;
   maxObservations?: number;
   log: Logger;
@@ -239,16 +243,17 @@ export function validateHistoryObservations(
   return accepted;
 }
 
-async function defaultComplete(prompt: string, log: Logger): Promise<string> {
+async function defaultComplete(prompt: string, log: Logger, model?: string): Promise<string> {
   return withLlmContext(
     { caller: 'daemon:imessage-history', lane: 'batch' },
     () => extractionComplete({
       prompt,
       maxTokens: 2500,
-      openaiModel: 'disabled-for-history',
+      openaiModel: model || 'disabled-for-history',
       log,
       caller: 'imessage-history',
-      provider: 'local',
+      // Without an explicit model, never fall back to a paid provider.
+      provider: model ? 'auto' : 'local',
       json: true,
     }),
   );
@@ -262,7 +267,7 @@ export async function runIMessageHistoryBatch(
   }
   const batchSize = Math.max(1, Math.min(Math.floor(opts.batchSize ?? 75), 200));
   const maxObservations = Math.max(1, Math.min(Math.floor(opts.maxObservations ?? 12), 30));
-  const rows = getNextIMessageHistoryRows(opts.before, batchSize);
+  const rows = getNextIMessageHistoryRows(opts.before, batchSize, opts.after);
   if (rows.length === 0) {
     return {
       batchId: null, scanned: 0, safe: 0, private: 0, botGenerated: 0,
@@ -272,7 +277,7 @@ export async function runIMessageHistoryBatch(
 
   const ids = rows.map((row) => row.id).sort((a, b) => a - b);
   const batchKey = createHash('sha256').update(`${opts.before}|${ids.join(',')}`).digest('hex');
-  const batch = beginIMessageHistoryBatch({ batchKey, rows, model: localLlmModel() || 'local-unconfigured' });
+  const batch = beginIMessageHistoryBatch({ batchKey, rows, model: opts.model || localLlmModel() || 'local-unconfigured' });
   opts.log(`history: batch #${batch.id} scanning ${rows.length} row(s), attempt ${batch.attempt_count}`);
 
   try {
@@ -292,7 +297,7 @@ export async function runIMessageHistoryBatch(
       const prompt = renderPrompt(modelRows, maxObservations);
       const text = opts.complete
         ? await opts.complete(prompt)
-        : await defaultComplete(prompt, opts.log);
+        : await defaultComplete(prompt, opts.log, opts.model);
       facts = validateHistoryObservations(parseRawExtraction(text), modelRows, maxObservations);
     }
 

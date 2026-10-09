@@ -178,7 +178,7 @@ export function setOneOffCallStarter(fn: (c: OneOffCall) => number): void { star
 // wakeup.ts registers these, for the same import-cycle reason as errandHooks.
 interface WakeCallHooks {
   onConnected: (id: number, attempt: number) => void;
-  onFinished: (id: number, attempt: number, r: { awake: boolean; answers: number }) => void;
+  onFinished: (id: number, attempt: number, r: { awake: boolean; answers: number; glitch?: boolean }) => void;
 }
 let wakeHooks: WakeCallHooks | null = null;
 export function setWakeCallHooks(h: WakeCallHooks): void { wakeHooks = h; }
@@ -630,7 +630,8 @@ function receptionSessionConfig(call: ErrandCall) {
       c.name ? `Caller ID matches a contact: ${c.name}. Still confirm who you're speaking with; caller ID can be wrong.` : `Caller ID does not match anyone ${o.name} knows.`,
       `When they want to talk to ${o.name} (and it isn't a sales or spam call), call connect_owner with their name and what it's about. Tell them "One moment, let me see if ${o.name} is free" right before. If it says to take a message, do that instead without explaining ${o.name}'s rules.`,
       `To take a message: get their name, what it's about, the best callback number (confirm the number they're calling from, or the one they give), and whether it's urgent. Repeat it back briefly, call take_message, say ${o.name} will get it, say goodbye.`,
-      `Sales calls, robocalls, surveys, "your car warranty", or anyone who won't say who they are: say ${o.name} isn't interested or available, goodbye, then end_call with status "failed" and the outcome "spam: <one line>".`,
+      `An automated voice reading a verification, security or sign-in code (any service) is EXPECTED: ${o.name} asked for it. Say nothing, let it read the code (it usually repeats), then call take_message with callerName = the service, reason = "verification code: <the digits>", urgent true, and end the call.`,
+      `Sales calls, other robocalls, surveys, "your car warranty", or anyone who won't say who they are: say ${o.name} isn't interested or available, goodbye, then end_call with status "failed" and the outcome "spam: <one line>".`,
       `Never share anything about ${o.name}: not their schedule, location, other numbers, email, family, or whether they're home. Never agree to anything for ${o.name}. You may say ${o.name} will call back.`,
       `If asked, say plainly you are an AI assistant working for ${o.name}.`,
       'Warm, brief, like a good front desk. Short spoken sentences.',
@@ -873,6 +874,9 @@ function runCall(callId: string, call: PendingCall): void {
   ws.on('message', async (raw) => {
     let ev: Record<string, any>;
     try { ev = JSON.parse(String(raw)); } catch { return; }
+    if (call.kind === 'errand' && call.reception && (ev.type === 'error' || /failed/.test(ev.type))) {
+      console.warn(`[phone] reception ${ev.type}: ${JSON.stringify(ev.error ?? ev).slice(0, 300)}`);
+    }
     if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
       transcript.push(`${call.kind === 'owner' ? 'You' : 'Them'}: ${String(ev.transcript).trim()}`);
       if (wake && isRealWakeAnswer(String(ev.transcript))) wakeAnswers++;
@@ -985,6 +989,20 @@ function runCall(callId: string, call: PendingCall): void {
   });
 }
 
+/** The code an automated caller read out, from their side of the transcript ("4 8 2 9 1 3" or "482913"). */
+export function codeFromCall(transcript: string[]): string | null {
+  const them = transcript.filter((l) => l.startsWith('Them:')).join(' ');
+  if (!/\b(code|verification|verify|passcode|security)\b/i.test(them)) return null;
+  const words: Record<string, string> = { zero: '0', oh: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
+  const spoken = them.toLowerCase().replace(/\b(zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/g, (w) => words[w]);
+  const runs = [...spoken.matchAll(/\d(?:[\s,.-]*\d){3,7}/g)].map((m) => m[0].replace(/\D/g, '')).filter((d) => d.length >= 4 && d.length <= 8);
+  if (!runs.length) return null;
+  // It usually repeats: prefer the run that appears most.
+  const count = new Map<string, number>();
+  for (const d of runs) count.set(d, (count.get(d) ?? 0) + 1);
+  return [...count.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
 async function finishCall(
   callId: string, call: PendingCall, transcript: string[], outcome: string, followUp: string, status: CallStatus | '',
   booking?: CallBooking,
@@ -994,6 +1012,15 @@ async function finishCall(
   if (call.kind === 'errand' && call.reception) {
     // Reception calls never reach errands or the one-off path.
     const r = call.reception;
+    // A verification code read out by a robocall (2026-10-08: Twilio blocks code texts,
+    // so services call instead). Sent at once, whatever the model did with the call.
+    // Kept a day for checking what the receptionist heard.
+    if (transcript.length) setMemory('phone', `reception_${todayET()}_${callId.slice(-8)}`, transcript.join('\n').slice(0, 8000));
+    const heard = codeFromCall(transcript);
+    if (heard) {
+      await sendInterrupt({ source: 'phone', subject: `call-code:${callId}`, kind: 'reply', bypass: 'reception-urgent', text: `🔑 Code read out on a call to my number: ${heard}` });
+      return;
+    }
     if (receptionMessage) await deliverMessage(r.caller, receptionMessage, { triedToConnect: !!r.missed });
     else if (r.missed) await deliverMessage(r.caller, { callerName: r.missed.name, callback: '', reason: r.missed.reason, urgent: false }, { triedToConnect: true });
     else if (transcript.length) await logDeclined(r.caller, outcome);
@@ -1050,6 +1077,33 @@ async function finishCall(
   await sendInterrupt({ source: 'phone', subject: `call:${call.actionId}`, kind: 'reply', text: lines.join('\n') });
 }
 
+/** A text to the assistant's Twilio number, passed on to the owner (2026-10-08). Rides /twilio/voice?step=sms
+ * because that's the one path the public tunnel already exposes. */
+export function smsForwardText(params: URLSearchParams): { text: string; code: boolean } | null {
+  const from = normalizePhone(params.get('From') || '');
+  const body = (params.get('Body') || '').trim();
+  const media = Number(params.get('NumMedia') || 0);
+  if (!body && !media) return null;
+  const caller = lookupCaller(params.get('From') || '', '');
+  const match = from.length === 10 ? errandHooks?.findCallback?.(from) ?? null : null;
+  const who = caller.name ?? match?.name ?? (from.length === 10 ? `(${from.slice(0, 3)}) ${from.slice(3, 6)}-${from.slice(6)}` : params.get('From') || 'unknown');
+  const about = match ? ` (re: ${match.goal.slice(0, 60)})` : '';
+  const pic = media ? ` [${media} photo${media > 1 ? 's' : ''}]` : '';
+  const code = /\b(code|verification|verify|passcode|otp|one[- ]time)\b/i.test(body) && /\b\d{4,8}\b/.test(body);
+  return { text: `💬 Text to my number from ${who}${about}: ${body || ''}${pic}`.trim(), code };
+}
+
+async function forwardInboundSms(params: URLSearchParams): Promise<void> {
+  const out = smsForwardText(params);
+  if (!out) return;
+  console.log(`[phone] inbound text from ${normalizePhone(params.get('From') || '')}`);
+  await sendInterrupt({
+    source: 'phone', subject: `sms:${params.get('MessageSid') || Date.now()}`, kind: 'reply', text: out.text,
+    // A sign-in code is useless by morning.
+    ...(out.code ? { bypass: 'reception-urgent' as const } : {}),
+  });
+}
+
 async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<void> {
   if (!openaiSignatureOk(req, body)) throw Object.assign(new Error('bad webhook signature'), { status: 401 });
   const ev = JSON.parse(body) as { type?: string; data?: { call_id?: string; sip_headers?: Array<{ name: string; value: string }> } };
@@ -1074,17 +1128,35 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
   // Their side is transcribed too, so a dropped call can say why. The full transcript
   // is still only stored when the owner asks ("keep transcript"); otherwise just the last few lines go into the call log.
   const transcribeThem = call.kind === 'owner' || call.keepTranscript || (call.kind === 'errand' && env('PHONE_TRANSCRIBE_THEM', 'true') !== 'false');
-  await callApi(callId, 'accept', {
-    type: 'realtime',
-    model: MODEL,
-    instructions: session.instructions,
-    tools: session.tools,
-    tool_choice: 'auto',
-    audio: {
-      input: { ...(transcribeThem ? { transcription: { model: TRANSCRIBE_MODEL } } : {}), turn_detection: { type: 'semantic_vad' } },
-      output: { voice: VOICE },
-    },
-  });
+  try {
+    await callApi(callId, 'accept', {
+      type: 'realtime',
+      model: MODEL,
+      instructions: session.instructions,
+      tools: session.tools,
+      tool_choice: 'auto',
+      audio: {
+        // Reception uses plain silence detection: a robocall reading a code hangs up right
+        // after, before semantic VAD ever closes the turn, so nothing got transcribed (2026-10-08).
+        input: {
+          ...(transcribeThem ? { transcription: { model: TRANSCRIBE_MODEL } } : {}),
+          turn_detection: call.kind === 'errand' && call.reception
+            ? { type: 'server_vad', silence_duration_ms: 600 }
+            : { type: 'semantic_vad' },
+        },
+        output: { voice: VOICE },
+      },
+    });
+  } catch (err) {
+    // OpenAI lost the call ("No session found for the provided call_id", a wake-up
+    // on 2026-10-08): the person picked up and hears silence. Hang up now instead of
+    // leaving them there, and let a wake-up call ring again in seconds.
+    console.error(`[phone] accept failed for ${callId}: ${err instanceof Error ? err.message.slice(0, 200) : err}`);
+    const sid = (call as PendingCall).twilioSid;
+    if (sid) twilioHangup(sid).catch(() => {});
+    if (call.kind === 'owner' && call.wake) wakeHooks?.onFinished(call.wake.id, call.wake.attempt, { awake: false, answers: 0, glitch: true });
+    return;
+  }
   runCall(callId, call);
 }
 
@@ -1242,6 +1314,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const query = new URLSearchParams(req.url?.split('?')[1] ?? '');
     const params = new URLSearchParams(body);
     const step = query.get('step');
+    if (step === 'sms') {
+      if (!twilioSignatureOk(req, params)) throw Object.assign(new Error('bad twilio signature'), { status: 403 });
+      await forwardInboundSms(params);
+      res.writeHead(200, { 'Content-Type': 'text/xml' }).end('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      return;
+    }
     if (step) {
       if (!twilioSignatureOk(req, params)) throw Object.assign(new Error('bad twilio signature'), { status: 403 });
       const allParams = new URLSearchParams([...params, ...query]);

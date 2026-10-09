@@ -47,6 +47,7 @@ Only those two paths are public, and each request is checked against Twilio's or
 
 Twilio console → your number → **Voice configuration**:
 - **A call comes in:** Webhook, `https://your-mac.your-tailnet.ts.net/twilio/voice`, HTTP **POST**.
+- Optional, under **Messaging configuration** → **A message comes in**: Webhook, `https://your-mac.your-tailnet.ts.net/twilio/voice?step=sms`, HTTP **POST**. Texts to the number are passed on to you; a sign-in code comes through even during quiet hours.
 - Save.
 
 ## 4. Connect OpenAI's voice model

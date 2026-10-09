@@ -66,6 +66,8 @@ const SHADOW_MODE = MODE === 'shadow';
 const NOT_BEFORE = parseStrEnv('IMESSAGE_EXTRACT_NOT_BEFORE', '');
 const HISTORY_ENABLED = parseBoolEnv('IMESSAGE_HISTORY_ENABLED', false);
 const HISTORY_BEFORE = parseStrEnv('IMESSAGE_HISTORY_BEFORE', NOT_BEFORE);
+const HISTORY_AFTER = parseStrEnv('IMESSAGE_HISTORY_AFTER', '');
+const HISTORY_MODEL = parseStrEnv('IMESSAGE_HISTORY_MODEL', '');
 const HISTORY_BATCH = parseNumEnv('IMESSAGE_HISTORY_BATCH', 75);
 const HISTORY_INTERVAL_MS = parseNumEnv('IMESSAGE_HISTORY_INTERVAL_MS', 10 * 60 * 1000);
 const HISTORY_MAX_OBSERVATIONS = parseNumEnv('IMESSAGE_HISTORY_MAX_OBSERVATIONS', 12);
@@ -368,6 +370,8 @@ async function historyTick(): Promise<void> {
   lastHistoryRunAt = now;
   const result = await runIMessageHistoryBatch({
     before: HISTORY_BEFORE,
+    after: HISTORY_AFTER || undefined,
+    model: HISTORY_MODEL || undefined,
     batchSize: HISTORY_BATCH,
     maxObservations: HISTORY_MAX_OBSERVATIONS,
     log,
@@ -414,8 +418,8 @@ if (SHADOW_MODE) {
 
 if (HISTORY_ENABLED) {
   console.log(
-    `[imessage-daemon] HISTORY mode: local-only, ${HISTORY_BATCH} rows every ${Math.round(HISTORY_INTERVAL_MS / 60_000)} minute(s), `
-    + `before ${HISTORY_BEFORE}; dated owner-private references only.`,
+    `[imessage-daemon] HISTORY mode: ${HISTORY_MODEL || 'local-only'}, ${HISTORY_BATCH} rows every ${Math.round(HISTORY_INTERVAL_MS / 60_000)} minute(s), `
+    + `before ${HISTORY_BEFORE}${HISTORY_AFTER ? `, from ${HISTORY_AFTER}` : ''}; dated owner-private references only.`,
   );
 }
 

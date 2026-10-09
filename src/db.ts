@@ -1414,7 +1414,7 @@ export interface IMessageHistoryFactInput {
 }
 
 /** Newest-first history cursor, independent of imessage_log.extracted_at. */
-export function getNextIMessageHistoryRows(before: string, limit = 75): IMessageLogRow[] {
+export function getNextIMessageHistoryRows(before: string, limit = 75, after?: string): IMessageLogRow[] {
   const bounded = Math.max(1, Math.min(Math.floor(limit), 200));
   return db.prepare(
     `SELECT l.id, l.rowid_src, l.chat_id, l.chat_name, l.sender, l.direction,
@@ -1424,9 +1424,10 @@ export function getNextIMessageHistoryRows(before: string, limit = 75): IMessage
      WHERE h.imessage_id IS NULL
        AND l.privacy_scope IS NULL
        AND datetime(l.ts) < datetime(?)
-     ORDER BY l.id DESC
+       AND datetime(l.ts) >= datetime(?)
+     ORDER BY l.ts DESC
      LIMIT ?`,
-  ).all(before, bounded) as IMessageLogRow[];
+  ).all(before, after ?? '1970-01-01T00:00:00Z', bounded) as IMessageLogRow[];
 }
 
 export function beginIMessageHistoryBatch(args: {

@@ -68,6 +68,8 @@ export interface AgentRuntimeOverrides {
   turnId?: string;
   /** More tool turns for long sub-agent runs (browser jobs). Default MAX_TURNS. */
   maxTurns?: number;
+  /** A cheaper model for simple runs (follow-up checks). Default OPENAI_MODEL. */
+  model?: string;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -602,7 +604,9 @@ export async function runAgent(
     ? []
     : groupConfig.key === 'family'
       ? familyHistory
-      : getRecentMessages(groupConfig.key);
+      // 40, not 75: topic memory (threads) carries longer arcs now, and each
+      // message of history rode along on every agent turn (2026-10-08 cost review).
+      : getRecentMessages(groupConfig.key, Number(process.env.HISTORY_LIMIT || 40));
 
   // Family source refs survive process restarts because historical refs are DB
   // message IDs. `current` is deliberately turn-local. Sender identity remains
@@ -654,7 +658,14 @@ export async function runAgent(
   // dynamic sections separate until this boundary so prompt caching can still be
   // measured and optimized later without changing context construction.
   const { staticPrefix, dynamic } = loadSystemBlocks(groupConfig, user, userMessage, precomputedRetrieval);
-  const instructions = `${staticPrefix}\n\n${dynamic}${threadBlock(matchedThreads)}`;
+  // Only the stable part is the `instructions` string, so it (and the tool list
+  // after it) is the same bytes every message and OpenAI's prompt cache serves
+  // it at a tenth of the price. The per-message part (date table, retrieval,
+  // jobs, topics) goes in as a developer message right before the owner's message.
+  // Before this, the per-message text sat inside the instructions and only
+  // ~47% of input was cached (2026-10-08 cost review).
+  const instructions = staticPrefix;
+  const turnContext = `${dynamic}${threadBlock(matchedThreads)}`.trim();
   // Responses API content part types are role-sensitive: user messages use
   // `input_text`, while assistant history must use `output_text`. Sending an
   // assistant turn back as `input_text` produces a 400 on the next message
@@ -680,6 +691,8 @@ export async function runAgent(
       ],
     };
   });
+
+  if (turnContext) input.push({ role: 'developer', content: [{ type: 'input_text', text: turnContext }] });
 
   // Build current message content — text + optional image / PDF document
   if (image || document) {
@@ -762,9 +775,10 @@ export async function runAgent(
     let result: Awaited<ReturnType<typeof createOpenAIResponse>>;
     try {
       result = await createResponse({
-        model: MODEL,
+        model: runtimeOverrides?.model ?? MODEL,
         maxOutputTokens: thinkingEnabled ? MAX_TOKENS_THINKING : MAX_TOKENS_DEFAULT,
         instructions,
+        promptCacheKey: `assistant-${groupConfig.key}`,
         input,
         tools: toolDefs.length > 0 ? toolDefs : undefined,
         reasoningEffort: thinkingEnabled ? 'medium' : 'low',
@@ -785,6 +799,13 @@ export async function runAgent(
         // doctor/dashboard. Interactive work still explains why it stopped.
         response = budgetStopResponse(systemAuthored, response, err.message);
         break;
+      }
+      // Too much in the window (big tool results piled up over many turns):
+      // shrink the earlier tool results and try this turn once more.
+      if (/context_length_exceeded|exceeds the context window/i.test(err instanceof Error ? err.message : String(err)) && shrinkToolOutputs(input)) {
+        console.warn(`[agent] context full on turn ${turn}; shrank earlier tool results and retrying`);
+        turn--;
+        continue;
       }
       throw err;
     }
@@ -1042,9 +1063,10 @@ export async function runAgent(
   if (!response) {
     try {
       const finalResult = await createResponse({
-        model: MODEL,
+        model: runtimeOverrides?.model ?? MODEL,
         maxOutputTokens: MAX_TOKENS_DEFAULT,
         instructions,
+        promptCacheKey: `assistant-${groupConfig.key}`,
         input,
         reasoningEffort: 'low',
       });
@@ -1075,4 +1097,25 @@ export async function runAgent(
 
 function getScopedTools(toolKeys: string[]): ToolDef[] {
   return toolKeys.flatMap((key) => toolRegistry[key] || []);
+}
+
+
+/**
+ * Shrink function_call_output texts in place (largest first, to ~3k chars each,
+ * keeping the newest two whole). Returns false when there's nothing left to cut,
+ * so a second overflow still throws instead of looping.
+ */
+export function shrinkToolOutputs(input: unknown[]): boolean {
+  const outs = (input as Array<Record<string, unknown>>)
+    .map((item, i) => ({ item, i }))
+    .filter(({ item }) => item?.type === 'function_call_output' && typeof item.output === 'string' && (item.output as string).length > 3500);
+  const keep = new Set(outs.slice(-2).map((o) => o.i));
+  let cut = false;
+  for (const { item, i } of outs) {
+    if (keep.has(i) && outs.length > 2) continue;
+    const text = item.output as string;
+    item.output = `${text.slice(0, 2500)}\n…[shortened: earlier result trimmed to fit]…\n${text.slice(-500)}`;
+    cut = true;
+  }
+  return cut;
 }

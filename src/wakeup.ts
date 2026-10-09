@@ -276,7 +276,7 @@ function closeCycle(row: WakeUpCallRow, result: string): void {
  * Record how an attempt went. `attempt` must match the current one, so a result
  * that arrives after the watchdog already gave up on that attempt is ignored.
  */
-export async function recordAttempt(id: number, attempt: number, outcome: 'awake' | string, now = new Date()): Promise<void> {
+export async function recordAttempt(id: number, attempt: number, outcome: 'awake' | string, now = new Date(), retryAfterMs?: number): Promise<void> {
   const row = getWakeUpCall(id);
   if (!row || row.status !== 'active' || !row.cycle_date || !row.call_state || row.attempts_today !== attempt) return;
   if (outcome === 'awake') {
@@ -296,9 +296,9 @@ export async function recordAttempt(id: number, attempt: number, outcome: 'awake
   }
   updateWakeUpCall(id, {
     call_state: null, last_result: `${outcome} (attempt ${attempt})`,
-    next_attempt_at: new Date(now.getTime() + retryMs()).toISOString(),
+    next_attempt_at: new Date(now.getTime() + (retryAfterMs ?? retryMs())).toISOString(),
   });
-  console.log(`[wakeup] #${id}: ${outcome}; retrying in ${retryMs() / 60_000} min`);
+  console.log(`[wakeup] #${id}: ${outcome}; retrying in ${Math.round((retryAfterMs ?? retryMs()) / 1000)}s`);
 }
 
 async function attemptCall(row: WakeUpCallRow, now: Date): Promise<void> {
@@ -353,7 +353,9 @@ export const wakeCallHooks = {
     const row = getWakeUpCall(id);
     if (row && row.call_state === 'calling' && row.attempts_today === attempt) updateWakeUpCall(id, { call_state: 'connected' });
   },
-  onFinished: (id: number, attempt: number, r: { awake: boolean; answers: number }) => {
+  onFinished: (id: number, attempt: number, r: { awake: boolean; answers: number; glitch?: boolean }) => {
+    // The assistant's voice never joined (OpenAI lost the call): ring again in 30s, not 3 min of waiting.
+    if (r.glitch) { void recordAttempt(id, attempt, "the assistant's voice didn't join the call", new Date(), 30_000); return; }
     void recordAttempt(id, attempt, r.awake ? 'awake' : `hung up without confirming (${r.answers} real answers)`);
   },
 };

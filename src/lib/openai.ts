@@ -49,6 +49,8 @@ export interface OpenAIResponseOptions {
   maxOutputTokens?: number;
   reasoningEffort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   signal?: AbortSignal;
+  /** Routes requests that share a long prefix to the same cache (OpenAI prompt_cache_key). */
+  promptCacheKey?: string;
 }
 
 function apiKey(): string {
@@ -123,6 +125,7 @@ export async function createOpenAIResponse(opts: OpenAIResponseOptions): Promise
     if (opts.instructions) body.instructions = opts.instructions;
     if (opts.tools?.length) body.tools = opts.tools;
     if (opts.reasoningEffort) body.reasoning = { effort: opts.reasoningEffort };
+    if (opts.promptCacheKey) body.prompt_cache_key = opts.promptCacheKey;
     const payload = JSON.stringify(body);
 
     const meter = (attempt: number, startedAt: number, kind: string) => recordLlmUsage({
@@ -282,15 +285,27 @@ export function toOpenAIFunctionTool(definition: {
   };
 }
 
+/** One tool result can't be allowed to fill the context window (2026-10-08: an email
+ * reply touching a dozen items died with context_length_exceeded). */
+const TOOL_OUTPUT_MAX_CHARS = Number(process.env.TOOL_OUTPUT_MAX_CHARS || 30_000);
+
+/** Keep the head and tail of an oversized text, with a note about what was cut. */
+export function capText(text: string, max = TOOL_OUTPUT_MAX_CHARS): string {
+  if (text.length <= max) return text;
+  const head = Math.floor(max * 0.75);
+  const tail = max - head;
+  return `${text.slice(0, head)}\n…[${text.length - max} characters cut to fit; ask a narrower question if you need the middle]…\n${text.slice(-tail)}`;
+}
+
 export function toolOutputToOpenAI(output: unknown): string | Array<Record<string, unknown>> {
   if (!Array.isArray(output)) {
-    return typeof output === 'string' ? output : JSON.stringify(output);
+    return capText(typeof output === 'string' ? output : JSON.stringify(output));
   }
 
   const parts: Array<Record<string, unknown>> = [];
   for (const block of output as Array<Record<string, unknown>>) {
     if (block.type === 'text' && typeof block.text === 'string') {
-      parts.push({ type: 'input_text', text: block.text });
+      parts.push({ type: 'input_text', text: capText(block.text) });
       continue;
     }
     if (block.type === 'image') {

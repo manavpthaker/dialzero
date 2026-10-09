@@ -56,7 +56,8 @@ export interface EmailThreadSpec {
 // ── Deps (stubbed in tests) ──────────────────────────────────────────────────
 
 export interface FollowupDeps {
-  runCheck: (prompt: string) => Promise<string>;
+  /** kind 'watch' = a read-only yes/no check (cheap model); 'thread' may draft an email as the owner (main model). */
+  runCheck: (prompt: string, kind?: 'watch' | 'thread') => Promise<string>;
   sendEmail: (p: { to: string; subject: string; body: string }) => Promise<void>;
   notify: (text: string, subject: string, kind: 'reply' | 'decision') => Promise<void>;
   ambient: (line: string, subject: string) => void;
@@ -64,10 +65,15 @@ export interface FollowupDeps {
 }
 
 const defaultDeps: FollowupDeps = {
-  runCheck: async (prompt) => {
+  runCheck: async (prompt, kind = 'thread') => {
     const { runAgent } = await import('./agent.js');
     const { getSystemUser } = await import('./lib/system-user.js');
-    return runAgent(FOLLOWUP_GROUP, getSystemUser(), prompt);
+    const { withLlmContext } = await import('./lib/llm-context.js');
+    const { OPENAI_ROUTER_MODEL } = await import('./lib/openai.js');
+    // Was untagged ("unknown") and on the main model: ~$30/week (2026-10-08).
+    const model = kind === 'watch' ? (process.env.FOLLOWUP_WATCH_MODEL || OPENAI_ROUTER_MODEL) : undefined;
+    return withLlmContext({ caller: `followups:${kind}`, lane: 'ambient', groupKey: FOLLOWUP_GROUP.key }, () =>
+      runAgent(FOLLOWUP_GROUP, getSystemUser(), prompt, undefined, undefined, undefined, undefined, undefined, undefined, { model }));
   },
   sendEmail: async ({ to, subject, body }) => {
     const { runSendEmail } = await import('./tools/outbound-send.js');
@@ -183,7 +189,7 @@ Your LAST message must be ONLY this JSON:
 async function checkWatch(job: JobRow, d: FollowupDeps): Promise<void> {
   const spec = JSON.parse(job.check_spec ?? '{}') as WatchSpec;
   const now = d.now();
-  const r = parseJson(await d.runCheck(watchPrompt(job, spec))) ?? { status: 'not_yet', summary: '' };
+  const r = parseJson(await d.runCheck(watchPrompt(job, spec), 'watch')) ?? { status: 'not_yet', summary: '' };
   const summary = str(r.summary);
   if (r.status === 'ok') {
     finishJob(job.id, 'done', summary || 'Checked out.');
@@ -204,7 +210,7 @@ async function checkThread(job: JobRow, d: FollowupDeps): Promise<void> {
   const spec = JSON.parse(job.check_spec ?? '{}') as EmailThreadSpec;
   const now = d.now();
   const answer = takeAnswer(job.id);
-  const r = parseJson(await d.runCheck(threadPrompt(job, spec, answer))) ?? { status: 'none' };
+  const r = parseJson(await d.runCheck(threadPrompt(job, spec, answer), 'thread')) ?? { status: 'none' };
   const summary = str(r.summary);
   const save = (patch: Partial<EmailThreadSpec>, next: number, progress?: string) =>
     patchJob(job.id, { check_spec: JSON.stringify({ ...spec, ...patch }), next_check_at: iso(next), ...(progress ? { progress } : {}) });
