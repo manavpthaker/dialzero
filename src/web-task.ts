@@ -29,6 +29,7 @@ import { jobCheckIns, openJob, setJobProgress, waitOnOwner, finishJob, takeAnswe
 import { getJob, getJobByRef, patchJob, markActionStopped } from './db.js';
 import { preferencesFor } from './lib/preferences.js';
 import { checkDone } from './lib/verify.js';
+import { siteRulePrompt } from './lib/site-rules.js';
 
 export interface WebTaskPayload {
   task: string;            // "cancel my PLAUD subscription, after exporting all recordings as audio"
@@ -150,7 +151,7 @@ export function webTaskPrompt(p: WebTaskPayload, progress: string[] = [], extra 
     : '';
   return `You are doing a task on a website for the owner, in their own Chrome. They're signed in to most sites, and a password manager may fill saved logins. Today is ${todayET()} (${tzAbbrev()}).
 
-TASK: ${p.task}${prefsFor(p.task, p.site)}
+TASK: ${p.task}${prefsFor(p.task, p.site)}${(() => { const r = siteRulePrompt(p.site); return r ? `\n${r}` : ''; })()}
 SITE: ${p.site}${p.files?.length ? `\nFILES YOU MAY UPLOAD (set_files, these paths only): ${p.files.join(', ')}` : ''}${p.share ? `\nDETAILS YOU MAY ENTER (and nothing else): ${p.share}` : ''}${p.notes ? `\nNOTES: ${p.notes}` : ''}${sofar}${extra ? `\n\n${extra}` : ''}
 
 You are ${getBotName()}, their assistant: get it done. The site won't make it obvious; figure it out.

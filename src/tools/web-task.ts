@@ -7,7 +7,8 @@ import { linkFamilyRequest } from '../family-requests.js';
 import { readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import type { ToolDef, ToolContext } from './index.js';
-import { getTimezone } from '../config.js';
+import { getTimezone, getOwner } from '../config.js';
+import { listRules, setRule, removeRule, describeRule, siteRuleRefusal, type SiteLevel } from '../lib/site-rules.js';
 import { proposeAction, getAction } from '../db.js';
 import { checkActionsEnabled } from '../lib/spend-cap.js';
 import { ownerAskedForWebTask } from '../lib/owner-request.js';
@@ -19,6 +20,35 @@ import { bookingWindowOpen } from '../web-booking.js';
 import { browserTools, quietCommandInGroupTab } from './browser.js';
 
 export const webTaskTools: ToolDef[] = [
+  {
+    definition: {
+      name: 'site_permissions',
+      description: `The owner's standing rules for what website jobs may do on a given site. USE WHEN they say things like "never change anything on my bank's site", "my brokerage is read only", "what are my site rules", "remove the rule for my bank". Levels: "read" = look only, never change anything there; "ask" = the default (reset). Owner only. Reply with the one line it returns.`,
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          op: { type: 'string', enum: ['set', 'remove', 'list'] },
+          site: { type: 'string', description: 'Site name or URL, e.g. "Example Bank" or "examplebank.com".' },
+          level: { type: 'string', enum: ['read', 'ask'] },
+          note: { type: 'string', description: "The owner's words for the rule, optional." },
+        },
+        required: ['op'],
+      },
+    },
+    handler: async (input, context?: ToolContext) => {
+      if (!context?.userId || context.userId !== getOwner().id) return 'Only the owner can set site rules.';
+      const op = String(input.op ?? 'list');
+      if (op === 'list') {
+        const rules = listRules();
+        return rules.length ? rules.map(describeRule).join('\n') : 'No site rules yet: every site is "ask" (website jobs do what the owner asks and never pay on the site itself).';
+      }
+      const site = String(input.site ?? '').trim();
+      if (op === 'remove') return removeRule(site) ? `Removed the rule for ${site}; it's back to the default (ask).` : `There was no rule for ${site}.`;
+      const r = setRule(site, String(input.level ?? '') as SiteLevel, input.note as string | undefined);
+      if ('error' in r) return r.error;
+      return `Saved: ${describeRule(r)}.`;
+    },
+  },
   {
     definition: {
       name: 'do_online',
@@ -46,6 +76,8 @@ After calling this, tell the owner the returned line in one short sentence (for 
       if (!enabled.ok) return enabled.reason!;
       const prepared = prepareWebTask(input);
       if ('error' in prepared) return `Not started: ${prepared.error}`;
+      const refused = siteRuleRefusal(String(input.site ?? ''), String(input.task ?? ''));
+      if (refused) return `Not started: ${refused}`;
       if (!bookingDeps().isConnected()) return `Not started: ${WEB_TASK_NOT_CONNECTED} (Tell the owner that in one line.)`;
       const group = context?.groupKey || 'admin';
       const quote = String(input.owner_request ?? '').trim();

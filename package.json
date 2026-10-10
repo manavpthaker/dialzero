@@ -68,6 +68,7 @@
     "relationship:pulse:dry": "tsx scripts/relationship-pulse-dry.ts",
     "test:modules": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-modules.ts",
     "test:web-task": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-web-task.ts",
+    "test:site-rules": "tsx scripts/test-site-rules.ts",
     "test:jobs": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-jobs.ts",
     "test:followups": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-followups.ts",
     "test:calendar-alerts": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-calendar-alerts.ts",
