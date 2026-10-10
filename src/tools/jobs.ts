@@ -3,7 +3,7 @@
 
 import type { ToolDef, ToolContext } from './index.js';
 import { getOwner } from '../config.js';
-import { describeOpenItems, stopItem, answerItem, changeItem } from '../jobs.js';
+import { describeOpenItems, describeItem, stopItem, answerItem, changeItem } from '../jobs.js';
 
 const isOwner = (c?: ToolContext) => !!c?.userId && c.userId === getOwner().id;
 
@@ -12,9 +12,15 @@ export const jobTools: ToolDef[] = [
     definition: {
       name: 'whats_going_on',
       description: `Everything you're doing or keeping an eye on for the owner, across website jobs, calls, emails and follow-ups, grouped: waiting on them, working on, keeping an eye on, finished lately. USE WHEN they asks "what are you working on", "how's X going", "anything waiting on me", "status". Reply in plain words, one short line per item, no numbers or ids, waiting-on-them first.`,
-      input_schema: { type: 'object' as const, properties: {} },
+      input_schema: {
+        type: 'object' as const,
+        properties: { which: { type: 'string', description: 'Optional: the owner\'s words for ONE job ("the halloween thing"). Returns that job step by step (its journal / call log), including ones finished this week. Blank = the whole list.' } },
+      },
     },
-    handler: async () => describeOpenItems(),
+    handler: async (input) => {
+      const w = String((input as { which?: string }).which ?? '').trim();
+      return w ? describeItem(w) : describeOpenItems();
+    },
   },
   {
     definition: {

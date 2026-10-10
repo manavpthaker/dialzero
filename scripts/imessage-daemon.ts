@@ -29,6 +29,7 @@ import { extractFirstJson, extractionComplete, makeLogger, haikuPrefilter, runDa
 import { automationsOff, automationAllowed } from '../src/lib/automations-off.js';
 import { isOwnedOn, moduleFor } from '../src/modules.js';
 import { runIMessageHistoryBatch } from '../src/imessage-history.js';
+import { localLlmEnabled } from '../src/lib/local-llm.js';
 
 // Phase 5: iMessage extraction daemon.
 //
@@ -287,7 +288,14 @@ function linkIncomingSenders(rows: IMessageLogRow[]): void {
   }
 }
 
+let shadowSkipLogged = false;
 async function liveTick(): Promise<void> {
+  // Shadow mode is local-model only: with no local model configured, skip it
+  // instead of throwing, which would also stop the history miner behind it.
+  if (SHADOW_MODE && !localLlmEnabled()) {
+    if (!shadowSkipLogged) { log('live: shadow mode needs a local model and none is configured; skipping live extraction'); shadowSkipLogged = true; }
+    return;
+  }
   // Close the startup/backlog window in one SQL statement on every tick. The
   // per-row partition below remains a second fail-closed check against races.
   const familyChatId = process.env.GROUP_FAMILY?.trim();

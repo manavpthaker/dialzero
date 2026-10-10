@@ -126,6 +126,17 @@ try {
     assert.match(t[0].text, /Booked Thu 4pm/);
   });
 
+  await check('checker: a "done" the call does not back up is held as blocked, not done', async () => {
+    const { setDoneChecker } = await import('../src/lib/verify.js');
+    setDoneChecker(async (i) => ({ ok: !/website/.test(i.claim), why: 'They only pointed to the website.' }));
+    try {
+      const id = activate(base);
+      await errands.applyCallResult(id, { status: 'done', outcome: 'They said to register on the website.', followUp: '', transcriptTail: 'Them: register online.' });
+      assert.notEqual(db.getErrand(id)!.status, 'done');
+      assert.match(db.getErrandEvents(id, 20).find((e) => e.type === 'call_result')!.detail ?? '', /Not confirmed: They only pointed to the website/);
+    } finally { setDoneChecker(null); }
+  });
+
   await check('no answer twice on the first place moves to the backup; no owner text', async () => {
     const id = activate(base);
     const dial = (idx: number) => db.addErrandEvent(id, 'dialing', `[t${idx}] test, action #0`);

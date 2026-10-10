@@ -11,9 +11,10 @@
 // tools in tools/jobs.ts (whats_going_on, stop_job, answer_job) work across all.
 
 import {
-  insertJob, getJob, getJobByRef, patchJob, listOpenJobRows, listErrands, listRecentJobRows, getMemory, setMemory,
+  insertJob, getJob, getJobByRef, patchJob, addJournal, getJournal, listOpenJobRows, listErrands, listRecentJobRows, getMemory, setMemory,
   type JobRow, type ErrandRow,
 } from './db.js';
+import { getTimezone } from './config.js';
 
 export type WaitNeed = 'login' | 'code' | 'link' | 'decision' | 'info';
 export type ItemStatus = 'waiting_on_you' | 'working' | 'watching';
@@ -40,26 +41,44 @@ export function openJob(kind: string, title: string, ref?: string, opts: { statu
     const existing = getJobByRef(ref);
     if (existing && ['working', 'waiting_on_you', 'watching'].includes(existing.status)) return existing.id;
   }
-  return insertJob({
+  const id = insertJob({
     title: title.trim().replace(/\s+/g, ' ').slice(0, 160),
     kind, ref: ref ?? null, status: opts.status ?? 'working',
     next_check_at: opts.next_check_at ?? null,
     check_spec: opts.check_spec == null ? null : JSON.stringify(opts.check_spec),
     parent_id: opts.parent_id ?? null,
   });
+  journal(id, 'start', title);
+  return id;
+}
+
+/** One line in the job's journal (never throws: the journal must not break a job). */
+export function journal(id: number, type: string, detail?: string | null): void {
+  try { addJournal(id, type, detail ?? null); } catch (err) { console.warn('[jobs] journal write failed:', err instanceof Error ? err.message : err); }
+}
+
+/** The job's recent history, oldest first, as plain lines in local time. */
+export function journalLines(id: number, limit = 12): string[] {
+  return getJournal(id, limit).reverse().map((r) => {
+    const t = new Date(`${r.at.replace(' ', 'T')}Z`).toLocaleString('en-US', { timeZone: getTimezone(), weekday: 'short', hour: 'numeric', minute: '2-digit' });
+    return `${t} ${r.type}: ${(r.detail ?? '').replace(/\s+/g, ' ').slice(0, 220)}`;
+  });
 }
 
 export function setJobProgress(id: number, line: string): void {
   patchJob(id, { progress: line.trim().slice(0, 240) });
+  journal(id, 'update', line);
 }
 
 /** The job needs the owner: a login, a code, a decision. It waits, it doesn't fail. */
 export function waitOnOwner(id: number, need: WaitNeed, ask: string, codeHost?: string | null): void {
   patchJob(id, { status: 'waiting_on_you', waiting_for: need, ask: ask.trim(), answer: null, answered_at: null, code_host: codeHost ?? null });
+  journal(id, 'ask', `(${need}) ${ask}`);
 }
 
 export function finishJob(id: number, status: 'done' | 'failed' | 'stopped', outcome: string): void {
   patchJob(id, { status, outcome: outcome.trim().slice(0, 400), waiting_for: null, ask: null, answer: null, finished_at: new Date().toISOString() });
+  journal(id, status, outcome);
 }
 
 /**
@@ -191,6 +210,37 @@ export function matchItem(which: string, filter?: (i: OpenItem) => boolean): { i
   return { item: scored[0].i };
 }
 
+/**
+ * One job in detail: where it stands plus its journal (errands: their call log), so
+ * "how's the Halloween thing going?" gets what actually happened, step by step.
+ * Looks at open jobs first, then ones finished in the last 7 days.
+ */
+export async function describeItem(whichText: string): Promise<string> {
+  const m = matchItem(whichText);
+  if ('ambiguous' in m) return `More than one matches. Ask which, in plain words: ${which(m.ambiguous)}?`;
+  if ('item' in m) {
+    const [kind, idStr] = m.item.key.split(':');
+    const id = Number(idStr);
+    if (kind === 'errand') {
+      const { getErrand, getErrandEvents } = await import('./db.js');
+      const { describeErrand } = await import('./errands.js');
+      const row = getErrand(id);
+      if (!row) return 'Not found.';
+      const log = getErrandEvents(id, 12).reverse().map((e) => `${e.at} ${e.type}: ${(e.detail ?? '').replace(/\s+/g, ' ').slice(0, 220)}`);
+      return `${describeErrand(row)}\n\nCall log:\n${log.join('\n')}`;
+    }
+    const job = getJob(id)!;
+    return `${job.title} (${job.status}${job.waiting_for ? `, waiting on the owner: ${job.ask}` : ''})\nNow: ${job.progress ?? '—'}\n\nWhat happened:\n${journalLines(id).join('\n') || '(nothing logged yet)'}`;
+  }
+  const want = tokens(whichText);
+  const recent = listRecentJobRows(new Date(Date.now() - 7 * 86_400_000).toISOString().replace('T', ' ').slice(0, 19), 40)
+    .map((j) => ({ j, score: tokens(j.title).filter((w) => want.some((x) => w.startsWith(x) || x.startsWith(w))).length }))
+    .filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
+  if (!recent.length) return 'Nothing matching, open or finished this week. Say so plainly.';
+  const j = recent[0].j;
+  return `${j.title} (finished: ${j.status})\nOutcome: ${j.outcome ?? '—'}\n\nWhat happened:\n${journalLines(j.id).join('\n') || '(no journal; finished before the journal existed)'}`;
+}
+
 function which(list: OpenItem[]): string {
   return list.slice(0, 4).map((i) => i.title.replace(/\.$/, '')).join(' or ');
 }
@@ -208,6 +258,18 @@ export async function answerItem(whichText: string, answer: string): Promise<str
     return `Passed on. Tell them in one line that you're back on it (${m.item.title.replace(/\.$/, '')}).`;
   }
   const job = getJob(id)!;
+  // "Want me to call them instead?" is answered by a call, not by another email check
+  // (2026-10-09: each "yes" re-ran the check, which asked again: 3 texts, no call).
+  if (job.kind === 'email_thread' && /want me to call/i.test(job.ask ?? '')) {
+    let spec: Record<string, unknown> = {};
+    try { spec = JSON.parse(job.check_spec ?? '{}'); } catch { /* */ }
+    if (/^\s*(no|nope|don'?t|skip|stop|never ?mind)\b/i.test(answer)) {
+      finishJob(id, 'stopped', 'The owner chose not to call.');
+      return 'Stopped. Tell them in one short line.';
+    }
+    finishJob(id, 'done', 'Handed to a phone call.');
+    return `The owner wants a call. Start it NOW with call_now (owner_request = their exact words): goal "${String(spec.goal ?? job.title)}", calling the office behind ${String(spec.to ?? '')} (look up their main number and hours with web_search; follow any timing they gave, e.g. "after 9"). Only say "calling" after call_now succeeds.`;
+  }
   let stored = answer.trim();
   if (job.waiting_for === 'code') {
     const code = extractCode(answer);
@@ -220,6 +282,8 @@ export async function answerItem(whichText: string, answer: string): Promise<str
     stored = link;
   }
   patchJob(id, { answer: stored, answered_at: new Date().toISOString(), status: 'working' });
+  // Codes and sign-in links are never written down.
+  journal(id, 'answer', job.waiting_for === 'code' || job.waiting_for === 'link' ? `(${job.waiting_for} received)` : stored);
   const resume = hooks[job.kind]?.resume;
   if (resume) setTimeout(() => resume(getJob(id)!), 200);
   return job.waiting_for === 'code'
@@ -262,6 +326,7 @@ export async function changeItem(whichText: string, change: string): Promise<str
   const job = getJob(id)!;
   const change_ = hooks[job.kind]?.change;
   if (!change_) return `I can't change "${job.title}" mid-way; stop it and start a new one.`;
+  journal(job.id, 'note', `The owner changed the plan: ${text}`);
   return change_(job, text);
 }
 

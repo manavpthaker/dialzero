@@ -24,6 +24,7 @@ import type { createCalendarEventRaw } from './tools/calendar.js';
 import { parseNumEnv } from './lib/env.js';
 import { todayET } from './lib/time-et.js';
 import { tzAbbrev } from './lib/time.js';
+import { checkDone } from './lib/verify.js';
 import type { GroupConfig } from './group-resolver.js';
 import { getBotName, getTimezone } from './config.js';
 
@@ -207,7 +208,7 @@ export function paymentRefusal(input: Record<string, unknown>): string | null {
 
 // ── Runner ──────────────────────────────────────────────────────────────────
 
-const BROWSER_MAX_TURNS = parseNumEnv('BROWSER_MAX_TURNS', 40);
+const BROWSER_MAX_TURNS = parseNumEnv('BROWSER_MAX_TURNS', 60);
 
 export const BOOKING_GROUP: GroupConfig = {
   key: 'booking',
@@ -237,7 +238,11 @@ const defaultDeps: BookingDeps = {
     // audience ('batch': only the global daily cap), not the background
     // allowance, even when a job resumes later with no chat context.
     const { withLlmContext } = await import('./lib/llm-context.js');
-    return withLlmContext({ caller: 'web-job', lane: 'batch', groupKey: BOOKING_GROUP.key }, () => runAgent(BOOKING_GROUP, getSystemUser(), prompt, undefined, undefined, undefined, undefined, undefined, undefined, { maxTurns: BROWSER_MAX_TURNS }));
+    return withLlmContext({ caller: 'web-job', lane: 'batch', groupKey: BOOKING_GROUP.key }, () => runAgent(BOOKING_GROUP, getSystemUser(), prompt, undefined, undefined, undefined, undefined, undefined, undefined, {
+      maxTurns: BROWSER_MAX_TURNS,
+      keepRecentToolOutputs: 4,
+      finalTurnNote: 'You are out of steps for this run. Do NOT do anything else. Reply now with your final JSON. If the job is not finished, use status "in_progress" and make the summary a precise handoff for the next run: what is DONE (item by item, with names/counts), what is LEFT, and the exact page you are on. The next run starts from that page with only your summary.',
+    }));
   },
   // Dynamic imports keep this module out of the tools/index.ts import cycle.
   createEvent: async (opts) => (await import('./tools/calendar.js')).createCalendarEventRaw(opts),
@@ -315,6 +320,14 @@ export async function runBrowserSubAgent(
   return out === TIMEOUT ? null : out;
 }
 
+let bookingPageText: () => Promise<string> = async () => {
+  if (process.env.ASSISTANT_DB_PATH && !process.env.DONE_CHECK_LIVE) return ''; // isolated tests
+  const { quietCommandInGroupTab } = await import('./tools/browser.js');
+  const r = await quietCommandInGroupTab('booking', 'extract_text', { selector: 'body' });
+  return String((r as { text?: unknown }).text ?? '').slice(0, 8000);
+};
+export function setBookingPageText(fn: (() => Promise<string>) | null): void { if (fn) bookingPageText = fn; }
+
 /**
  * One booking attempt for actions row `actionId`: browser lock → time-boxed
  * sub-agent → parse → calendar on done → reply to the owner → finalize the row.
@@ -336,6 +349,16 @@ export async function runWebBooking(actionId: number, p: BookingPayload): Promis
         : parseBookingResult(out);
     } catch (err) {
       result = { status: 'failed', summary: `Browser error: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  // The checker: the booking page has to show it.
+  if (result.status === 'done' && result.booking) {
+    const page = await bookingPageText().catch(() => '');
+    if (page.trim()) {
+      const b = result.booking;
+      const v = await checkDone({ kind: 'website', goal: `Book ${p.what} at ${p.where}`, claim: `${result.summary} ${b.title} at ${b.start}${b.confirmation ? ` (confirmation ${b.confirmation})` : ''}`, evidence: `Final page:\n${page}` });
+      if (!v.ok) result = { status: 'failed', summary: `Not confirmed on the page: ${v.why}` };
     }
   }
 

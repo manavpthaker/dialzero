@@ -756,6 +756,16 @@ const schedulingMigrations = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_ref ON jobs(ref)`,
+  // The job journal (2026-10-09): every step a job takes, so "how's X going?" and a
+  // restart both see what actually happened. Errands keep theirs in errand_events.
+  `CREATE TABLE IF NOT EXISTS job_journal (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id  INTEGER NOT NULL,
+    type    TEXT NOT NULL,  -- start | run | ask | answer | check | update | done | failed | stopped | note
+    detail  TEXT,
+    at      TEXT DEFAULT (datetime('now'))
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_job_journal_job ON job_journal(job_id, id)`,
 ];
 for (const sql of schedulingMigrations) {
   try { db.exec(sql); } catch { /* column already exists */ }
@@ -4592,6 +4602,14 @@ export function getErrandsForCallback(days = 3): ErrandRow[] {
 export function listErrands(opts: { open?: boolean; limit?: number } = {}): ErrandRow[] {
   const where = opts.open ? `WHERE status IN ('active','waiting')` : '';
   return db.prepare(`SELECT * FROM errands ${where} ORDER BY id DESC LIMIT ?`).all(opts.limit ?? 20) as ErrandRow[];
+}
+
+export interface JournalRow { id: number; job_id: number; type: string; detail: string | null; at: string }
+export function addJournal(jobId: number, type: string, detail?: string | null): void {
+  db.prepare('INSERT INTO job_journal (job_id, type, detail) VALUES (?, ?, ?)').run(jobId, type, detail == null ? null : String(detail).slice(0, 2000));
+}
+export function getJournal(jobId: number, limit = 30): JournalRow[] {
+  return db.prepare('SELECT * FROM job_journal WHERE job_id = ? ORDER BY id DESC LIMIT ?').all(jobId, limit) as JournalRow[];
 }
 
 export function addErrandEvent(errandId: number, type: string, detail?: string | null): void {

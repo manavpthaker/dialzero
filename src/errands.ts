@@ -33,6 +33,7 @@ import { createCalendarEventRaw } from './tools/calendar.js';
 import { normalizePhone } from './lib/phone.js';
 import { todayET } from './lib/time-et.js';
 import { localOffset } from './lib/time.js';
+import { checkDone } from './lib/verify.js';
 import { getBotName, getOwner, getTimezone } from './config.js';
 import {
   createErrand, getErrand, updateErrand, getDueErrands, getErrandsInCall, getErrandsForCallback, addErrandEvent,
@@ -137,6 +138,8 @@ export interface Envelope {
    * the result as a reply rather than a check-in item.
    */
   reply_mode?: boolean;
+  /** A practice call (the morning check): never texts the owner, writes no call notes. */
+  silent?: boolean;
 }
 
 type Prepared = { payload: Record<string, unknown>; summary: string } | { error: string };
@@ -302,6 +305,7 @@ function later(ms: number, fn: () => void): void {
 
 async function tellOwner(row: ErrandRow, kind: NotifyKind, text: string): Promise<void> {
   if (notifyOverride) return notifyOverride(row, kind, text);
+  if (envelopeOf(row).silent) return;
   const env = envelopeOf(row);
   const subject = `errand:${row.id}`;
   if (kind === 'callback') {
@@ -330,7 +334,7 @@ function shortGoal(goal: string): string {
 
 /** One progress line between calls. Milestones: moved to the next place, or pushed to another day. */
 async function progressUpdate(row: ErrandRow, line: string, milestone: boolean): Promise<void> {
-  if (notifyOverride) return;
+  if (notifyOverride || envelopeOf(row).silent) return;
   await updateOwner(`errand:${row.id}`, `📞 ${shortGoal(envelopeOf(row).goal)}: ${line}`, { milestone, source: 'errands' });
 }
 
@@ -467,6 +471,7 @@ export function noteLine(n: CallNoteRow): string {
 
 /** Save what a call learned, for the next call to this place and for "who did we talk to". */
 export function recordCallNote(row: ErrandRow, target: ErrandTarget, result: CallResult, direction: 'out' | 'callback' = 'out'): void {
+  if (envelopeOf(row).silent) return;
   const n = result.notes;
   const engaged = !/no one engaged/i.test(result.outcome) || !!result.menuLog?.length;
   if (!n && !engaged) return;
@@ -619,6 +624,15 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
   }
   const env = envelopeOf(row);
   const target = env.targets[row.target_idx];
+  // The checker: "done" has to be backed by what was actually said on the call.
+  if (result.status === 'done') {
+    const b = result.booking;
+    const v = await checkDone({
+      kind: 'call', goal: row.goal, claim: result.outcome,
+      evidence: [b ? `Booking recorded: ${b.title} at ${b.start}${b.confirmation ? ` (conf ${b.confirmation})` : ''}` : '', result.botSaid ? `${getBotName()} said: ${result.botSaid}` : '', result.transcriptTail].filter(Boolean).join('\n'),
+    });
+    if (!v.ok) result = { ...result, status: 'blocked', outcome: `Not confirmed: ${v.why} (${getBotName()}'s note: ${result.outcome})`, booking: undefined };
+  }
   // Dials to this target since the owner last restarted the list (newest first).
   const events = getErrandEvents(id, 200);
   const restart = events.findIndex((e) => e.type === 'note' && e.detail?.includes('starting over'));

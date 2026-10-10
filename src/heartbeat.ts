@@ -150,7 +150,9 @@ async function heartbeatTaskCheck() {
     // which burned a slot on the escalating backoff ladder even when the send
     // failed -- the task then went quiet for longer without the owner ever hearing
     // about it. Same for the cooldown stamp.
-    if (decision.sent) {
+    // A deferral into the next brief counts too: "decision" never texts, so without
+    // this the same 5 chores were re-queued every 30 minutes and never decayed (2026-10-09).
+    if (decision.sent || decision.decision === 'deferred') {
       for (const t of surfaced) markTaskSurfaced(t.id);
       setMemory('system', 'task_heartbeat_last_run', new Date().toISOString());
     }

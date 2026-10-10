@@ -46,6 +46,8 @@
     "seed:facts": "tsx scripts/seed-facts.ts",
     "seed:facts:dry": "tsx scripts/seed-facts.ts --dry",
     "doctor": "tsx scripts/doctor.ts",
+    "scorecard": "tsx scripts/scorecard.ts",
+    "canary": "tsx scripts/canary.ts",
     "doctor:setup": "tsx scripts/doctor.ts --setup",
     "env:example": "tsx scripts/gen-env-example.ts",
     "memory-audit": "tsx scripts/memory-audit.ts",

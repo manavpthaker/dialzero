@@ -116,6 +116,28 @@ function imsgWho(m: IMessageLogRow): string {
   return m.direction === 'out' ? getOwner().name : (m.chat_name || m.sender);
 }
 
+/** Every job the assistant is doing or did this week, with its journal. */
+function renderJobsSection(): string {
+  type J = { id: number; kind: string; title: string; status: string; progress: string | null; ask: string | null; outcome: string | null; updated_at: string };
+  const d = db as unknown as { prepare: (s: string) => { all: (...a: unknown[]) => unknown[] } };
+  const jobs = d.prepare(`SELECT id, kind, title, status, progress, ask, outcome, updated_at FROM jobs
+    WHERE status IN ('working','waiting_on_you','watching') OR updated_at > datetime('now','-7 days')
+    ORDER BY CASE status WHEN 'waiting_on_you' THEN 0 WHEN 'working' THEN 1 WHEN 'watching' THEN 2 ELSE 3 END, updated_at DESC LIMIT 40`).all() as J[];
+  const errands = d.prepare(`SELECT id, goal, status, outcome, updated_at FROM errands WHERE goal NOT LIKE 'CANARY%' AND (status IN ('active','waiting') OR updated_at > datetime('now','-7 days')) ORDER BY updated_at DESC LIMIT 20`).all() as Array<{ id: number; goal: string; status: string; outcome: string | null; updated_at: string }>;
+  const color = (st: string) => st === 'waiting_on_you' || st === 'waiting' ? '#c98a0b' : st === 'done' ? '#22875a' : st === 'failed' ? '#c0392b' : '#3d4b5c';
+  const jobRows = jobs.map((j) => {
+    const log = (d.prepare('SELECT type, detail, at FROM job_journal WHERE job_id = ? ORDER BY id DESC LIMIT 6').all(j.id) as Array<{ type: string; detail: string | null; at: string }>).reverse();
+    return `<details><summary><b style="color:${color(j.status)}">${escapeHtml(j.status)}</b> · ${escapeHtml(j.kind)} · ${escapeHtml(j.title)}${j.ask ? ` — <i>${escapeHtml(j.ask)}</i>` : ''}</summary>
+<div style="font-size:12px;margin:4px 0 8px 16px">${escapeHtml(j.outcome ?? j.progress ?? '')}<ul>${log.map((l) => `<li>${escapeHtml(l.at.slice(5, 16))} <b>${escapeHtml(l.type)}</b>: ${escapeHtml((l.detail ?? '').slice(0, 300))}</li>`).join('') || '<li>(no journal yet)</li>'}</ul></div></details>`;
+  }).join('\n');
+  const errandRows = errands.map((e) => {
+    const log = (d.prepare('SELECT type, detail, at FROM errand_events WHERE errand_id = ? ORDER BY id DESC LIMIT 6').all(e.id) as Array<{ type: string; detail: string | null; at: string }>).reverse();
+    return `<details><summary><b style="color:${color(e.status)}">${escapeHtml(e.status)}</b> · call · ${escapeHtml(e.goal.slice(0, 120))}</summary>
+<div style="font-size:12px;margin:4px 0 8px 16px">${escapeHtml(e.outcome ?? '')}<ul>${log.map((l) => `<li>${escapeHtml(l.at.slice(5, 16))} <b>${escapeHtml(l.type)}</b>: ${escapeHtml((l.detail ?? '').slice(0, 300))}</li>`).join('')}</ul></div></details>`;
+  }).join('\n');
+  return `<h2>Jobs — doing &amp; done this week (${jobs.length + errands.length})</h2>\n${errandRows}\n${jobRows}`;
+}
+
 function renderOutboundSection(): string {
   const cfg = arbiterConfig();
   const today = toSqliteDate(startOfTodayET()) ?? '';
@@ -410,6 +432,7 @@ function renderDashboard(): string {
   <div class="stat"><span class="v">${stats.last_reflection ? escapeHtml(stats.last_reflection.slice(0, 16).replace('T', ' ')) : '—'}</span><span class="k">last reflection</span></div>
 </div>
 
+${renderJobsSection()}
 ${renderOutboundSection()}
 ${renderActionsSection()}
 

@@ -6,7 +6,7 @@ import type { GroupConfig } from './group-resolver.js';
 import type { User } from './user-resolver.js';
 import type { ImageData, DocumentData } from './channels/imessage.js';
 import { loadSystemBlocks, getRetrievedBlocksSmart } from './context-resolver.js';
-import { getRecentMessages, getRecentMessagesWithMetadata, getMessagesSinceForGroups, listFamilyLists, saveMessage, appendToMessage, type MessageRow } from './db.js';
+import db, { getRecentMessages, getRecentMessagesWithMetadata, getMessagesSinceForGroups, listFamilyLists, saveMessage, appendToMessage, type MessageRow } from './db.js';
 import { toolRegistry, type ToolDef } from './tools/index.js';
 import { getProfileConfig } from './config.js';
 import { bindFamilyListAddRequest } from './family-list-intent.js';
@@ -70,6 +70,14 @@ export interface AgentRuntimeOverrides {
   maxTurns?: number;
   /** A cheaper model for simple runs (follow-up checks). Default OPENAI_MODEL. */
   model?: string;
+  /**
+   * Long browser runs: keep only the last N tool results in full; older page dumps and
+   * screenshots shrink to a stub. Each snapshot re-sent on every turn is what filled
+   * the context and ended runs "out of steps".
+   */
+  keepRecentToolOutputs?: number;
+  /** Said to the model on its last turn (tools gone): e.g. how to hand off unfinished work. */
+  finalTurnNote?: string;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -772,6 +780,7 @@ export async function runAgent(
 
   const maxTurns = Math.max(2, runtimeOverrides?.maxTurns ?? MAX_TURNS);
   for (let turn = 0; turn < maxTurns; turn++) {
+    if (runtimeOverrides?.keepRecentToolOutputs) compactOldToolOutputs(input, runtimeOverrides.keepRecentToolOutputs);
     let result: Awaited<ReturnType<typeof createOpenAIResponse>>;
     try {
       result = await createResponse({
@@ -974,6 +983,7 @@ export async function runAgent(
             turnId,
           });
         }
+        logToolUse(block.name, groupConfig.key);
         const output = await tool.handler(toolInput, {
           groupKey: groupConfig.key,
           userId: user.id,
@@ -1056,6 +1066,7 @@ export async function runAgent(
     // On the second-to-last turn, force a final text response (no more tools).
     if (turn === maxTurns - 2) {
       toolDefs.length = 0;
+      if (runtimeOverrides?.finalTurnNote) input.push({ role: 'developer', content: [{ type: 'input_text', text: runtimeOverrides.finalTurnNote }] });
     }
   }
 
@@ -1105,6 +1116,44 @@ function getScopedTools(toolKeys: string[]): ToolDef[] {
  * keeping the newest two whole). Returns false when there's nothing left to cut,
  * so a second overflow still throws instead of looping.
  */
+/** Which tools actually get used, so unused ones can be pruned from the prompt with data. */
+function logToolUse(name: string, group: string): void {
+  try { dbForTools().prepare('INSERT INTO tool_use (tool, group_key) VALUES (?, ?)').run(name, group); } catch { /* logging never breaks a turn */ }
+}
+type ToolDb = { prepare: (s: string) => { run: (...a: unknown[]) => unknown } };
+let toolDbReady = false;
+function dbForTools(): ToolDb {
+  const t = db as unknown as ToolDb;
+  if (!toolDbReady) {
+    t.prepare(`CREATE TABLE IF NOT EXISTS tool_use (id INTEGER PRIMARY KEY AUTOINCREMENT, tool TEXT NOT NULL, group_key TEXT, at TEXT DEFAULT (datetime('now')))`).run();
+    toolDbReady = true;
+  }
+  return t;
+}
+
+/**
+ * Keep the newest `keep` tool results whole; shrink older ones to a short stub. Runs
+ * in batches (only once `keep + 6` are full) so the cached prefix holds for a few turns.
+ */
+const compacted = new WeakSet<object>(); // never sent to the API (an extra field would be a 400)
+export function compactOldToolOutputs(input: unknown[], keep: number): number {
+  const outs = (input as Array<Record<string, unknown>>).filter((item) => item?.type === 'function_call_output' && !compacted.has(item));
+  if (outs.length <= keep + 6) return 0;
+  let n = 0;
+  for (const item of outs.slice(0, outs.length - keep)) {
+    const o = item.output;
+    if (Array.isArray(o)) {
+      const text = o.filter((b: Record<string, unknown>) => b?.type === 'input_text').map((b: Record<string, unknown>) => String(b.text ?? '')).join(' ');
+      item.output = `[older result: screenshot dropped to save room]${text ? ` ${text.slice(0, 200)}` : ''}`;
+    } else if (typeof o === 'string' && o.length > 400) {
+      item.output = `${o.slice(0, 300)}…[older result trimmed to save room]`;
+    }
+    compacted.add(item);
+    n++;
+  }
+  return n;
+}
+
 export function shrinkToolOutputs(input: unknown[]): boolean {
   const outs = (input as Array<Record<string, unknown>>)
     .map((item, i) => ({ item, i }))

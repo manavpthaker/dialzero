@@ -309,6 +309,23 @@ try {
     assert.equal(wt.activeWebTaskRun(), null);
   });
 
+  await check('journal: start, ask, answer (codes never written), finish; "how is X going" reads it back', async () => {
+    const id = jobs.openJob('web_task', 'Register for the Halloween Bash on the city website', 'action:9901');
+    jobs.setJobProgress(id, 'On the registration form');
+    jobs.waitOnOwner(id, 'code', 'The city texted you a code. What is it?');
+    await jobs.answerItem('halloween', '482913');
+    jobs.finishJob(id, 'done', 'Registered 3 people, confirmation HB-77');
+    const lines = jobs.journalLines(id).join('\n');
+    assert.match(lines, /start: Register for the Halloween Bash/);
+    assert.match(lines, /ask: \(code\)/);
+    assert.match(lines, /answer: \(code received\)/);
+    assert.ok(!lines.includes('482913'), 'the code is never journaled');
+    assert.match(lines, /done: Registered 3 people/);
+    const detail = await jobs.describeItem('halloween');
+    assert.match(detail, /finished: done/);
+    assert.match(detail, /confirmation HB-77/);
+  });
+
   console.log(`\nJob tracker tests passed: ${passed} checks.`);
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

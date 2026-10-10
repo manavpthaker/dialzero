@@ -33,6 +33,9 @@ import { startFamilyRuntimeScheduler } from './family-runtime.js';
 import { verifySharedAudience } from './family-membership.js';
 import { startEmailReconciliationRuntime } from './email-reconciliation.js';
 import { isOwnedOn, moduleFor, resolveModules } from './modules.js';
+import { startWatchdog } from './watchdog.js';
+import { startCanary } from './canary.js';
+import { startScorecard } from './scorecard.js';
 import { getOwner } from './config.js';
 
 // Fixed receipt ack fired the instant a message lands, so the user knows it was
@@ -108,6 +111,10 @@ async function main() {
     ['followups', startFollowups],
     // Calls/jobs the owner approved for the Family chat: post results back there.
     ['family-requests', startFamilyRequests],
+    // Health watchdog: texts once, with the fix, when something stays broken 30 minutes.
+    ['watchdog', startWatchdog],
+    // Morning check: a practice call + signed-in site check (CANARY_ENABLED=true).
+    ['canary', startCanary],
   ];
   for (const [key, start] of services) {
     if (!isOwnedOn('start', key)) continue;
@@ -288,6 +295,7 @@ async function main() {
     ['family-scheduler', () => { startFamilyRuntimeScheduler(); }],
     ['email-reconciliation', startEmailReconciliationRuntime],
     ['omi-sync', startOmiSync],                    // also needs OMI_MCP_KEY; OMI_SYNC_ENABLED
+    ['scorecard', startScorecard],                 // weekly scorecard into Sunday's morning check-in
   ];
 
   const started: string[] = [];

@@ -115,7 +115,7 @@ export function extractPrompt(card: OmiCard, transcript: string, today: string):
 
 Rules:
 - Only what the owner themselves said or agreed to. Skip promises made to them, and skip anything from media, ads, or background audio.
-- todos: only clear, real tasks the owner must do ("I'll send the deck Friday"). Resolve relative dates against today (${today}); no date → null. If in doubt, leave it out.
+- todos: ONLY when the owner explicitly commits to or asks for a reminder about a real errand or piece of work ("remind me to…", "I need to call…", "I'll send the deck Friday"). NEVER household moment-to-moment instructions or chores said in passing (shower, floss, laundry, "get it over there", "put that back"), things said to or about a child, or things someone else will do. Resolve relative dates against today (${today}); no date → null. If in doubt, leave it out: most conversations have zero todos.
 - people: real names only. Skip the owner, celebrities, and people only heard on media.
 - Omit any empty section. If nothing durable happened (small talk, a show playing), reply {}.
 

@@ -19,10 +19,11 @@ import {
   getDueJobs, patchJob, proposeAction, confirmAction, markActionExecuting, markActionDone, markActionFailed,
   getAction, type JobRow,
 } from './db.js';
-import { openJob, finishJob, waitOnOwner, takeAnswer, registerJobKind } from './jobs.js';
+import { openJob, finishJob, waitOnOwner, takeAnswer, registerJobKind, journal } from './jobs.js';
 import { todayET } from './lib/time-et.js';
 import { onWebTaskDone } from './web-task.js';
 import { preferencesFor } from './lib/preferences.js';
+import { checkDone } from './lib/verify.js';
 import type { GroupConfig } from './group-resolver.js';
 
 const TICK_MS = 15 * 60_000;
@@ -162,7 +163,7 @@ CHECK: ${spec.what}
 Use the email search/read tools and, for charges, the transaction tools. Search a few ways (sender name, domain, subject words).
 
 Your LAST message must be ONLY this JSON:
-{"status":"ok|problem|not_yet","summary":"one short plain line for the owner"}
+{"status":"ok|problem|not_yet","summary":"one short plain line for the owner","evidence":"for ok/problem: sender, date and the exact sentence(s) from the email or transaction that show it"}
 - ok: it checked out (e.g. "Plaud confirmed the cancellation by email.").
 - problem: something's wrong they should act on (e.g. "Plaud charged you $9.99 on Oct 30 after cancelling."). Say what you'd do about it.
 - not_yet: nothing to see yet; you'll check again later.`;
@@ -179,7 +180,7 @@ DETAILS THEY ALLOWED SHARING: ${spec.share || '(only their name)'}${(() => { con
 Look for a reply from ${spec.to} (or that company's domain) after the last email from them: search by sender and by subject words, then read the thread.
 
 Your LAST message must be ONLY this JSON:
-{"status":"done|reply|needs_owner|none","summary":"one short plain line for the owner","reply_body":"for reply: the email to send back, as them, plain text","ask":"for needs_owner: their one short question","followup_body":"for none: a short polite follow-up, as them, in case it's needed"}
+{"status":"done|reply|needs_owner|none","summary":"one short plain line for the owner","evidence":"for done: sender, date and the exact sentence(s) from their reply that show it","reply_body":"for reply: the email to send back, as them, plain text","ask":"for needs_owner: their one short question","followup_body":"for none: a short polite follow-up, as them, in case it's needed"}
 - done: the goal is met or they gave a final answer (summary says what).
 - reply: they asked for something you can answer from GOAL and DETAILS (or their answer above). Never share anything beyond those, never agree to pay or to a new charge.
 - needs_owner: they need something only they can give or decide.
@@ -191,6 +192,11 @@ async function checkWatch(job: JobRow, d: FollowupDeps): Promise<void> {
   const now = d.now();
   const r = parseJson(await d.runCheck(watchPrompt(job, spec), 'watch')) ?? { status: 'not_yet', summary: '' };
   const summary = str(r.summary);
+  // The checker: "it checked out" needs the email or charge that shows it.
+  if (r.status === 'ok' && !(await checkDone({ kind: 'website', goal: spec.what, claim: summary, evidence: str(r.evidence) })).ok) {
+    journal(job.id, 'check', `Said ok, not verified: ${summary}`);
+    r.status = 'not_yet';
+  }
   if (r.status === 'ok') {
     finishJob(job.id, 'done', summary || 'Checked out.');
     d.ambient(`✅ ${summary || job.title}`, `watch:${job.id}`);
@@ -215,6 +221,10 @@ async function checkThread(job: JobRow, d: FollowupDeps): Promise<void> {
   const save = (patch: Partial<EmailThreadSpec>, next: number, progress?: string) =>
     patchJob(job.id, { check_spec: JSON.stringify({ ...spec, ...patch }), next_check_at: iso(next), ...(progress ? { progress } : {}) });
 
+  if (r.status === 'done' && !(await checkDone({ kind: 'website', goal: spec.goal, claim: summary, evidence: str(r.evidence) })).ok) {
+    journal(job.id, 'check', `Said done, not verified: ${summary}`);
+    r.status = 'none';
+  }
   if (r.status === 'done') {
     finishJob(job.id, 'done', summary);
     await d.notify(`✅ ${summary}`, `email-thread:${job.id}`, 'reply');

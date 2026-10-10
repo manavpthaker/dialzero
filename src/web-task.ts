@@ -25,9 +25,10 @@ import { todayET } from './lib/time-et.js';
 import { bookingDeps, runBrowserSubAgent, abortBrowserRun, FORBIDDEN_SHARE, looksLikeCardNumber } from './web-booking.js';
 import { updateOwner, cleanUpdate, isInfraError } from './lib/job-updates.js';
 import { needsHands, showJobTab, withTakeover } from './lib/takeover.js';
-import { jobCheckIns, openJob, setJobProgress, waitOnOwner, finishJob, takeAnswer, registerJobKind, type WaitNeed } from './jobs.js';
+import { jobCheckIns, openJob, setJobProgress, waitOnOwner, finishJob, takeAnswer, registerJobKind, journal, type WaitNeed } from './jobs.js';
 import { getJob, getJobByRef, patchJob, markActionStopped } from './db.js';
 import { preferencesFor } from './lib/preferences.js';
+import { checkDone } from './lib/verify.js';
 
 export interface WebTaskPayload {
   task: string;            // "cancel my PLAUD subscription, after exporting all recordings as audio"
@@ -331,13 +332,14 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
           // A run that ran out of steps before writing its JSON isn't a wall:
           // carry on from the page it's on, with whatever it said last.
           if (result.status === 'failed' && /^Couldn't read the result/.test(result.summary)) {
-            const said = (out ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+            const said = (out ?? '').replace(/\s+/g, ' ').trim().slice(0, 1200);
             result = { status: 'in_progress', summary: `Ran out of steps mid-way; continue from the current page.${said ? ` It last said: ${said}` : ''}` };
           }
         } catch (err) {
           result = { status: 'failed', summary: `Browser error: ${err instanceof Error ? err.message : String(err)}` };
         }
       }
+      journal(jobId, 'run', `Run ${st.runs}: ${result.status}: ${result.summary}${result.url ? ` (${result.url})` : ''}`);
       // Stopped while that run was going: end quietly (they already know).
       if (getAction(actionId)?.status === 'cancelled') return { status: 'failed', summary: 'stopped' };
       // The assistant's own plumbing failed (AI credit ran out, rate limit, outage),
@@ -411,6 +413,24 @@ export async function runWebTask(actionId: number, p: WebTaskPayload): Promise<W
         const askText = hands ? withTakeover(cleanUpdate(askWithProgress(result)), pageHost, { id: jobId, label: result.ask ?? result.summary }) : cleanUpdate(askWithProgress(result));
         if (askAllowed(st)) try { await d.notify(askText, `web-task:${actionId}:ask`); st.lastAskAt = Date.now(); saveState(actionId, st); } catch (err) { console.error('[web-task] could not ask the owner:', err); }
         return result;
+      }
+      if (result.status === 'done' && !p.practice) {
+        // The checker: the final page has to show it happened before the owner hears "done".
+        const page = await pageTextReader().catch(() => '');
+        // No page to read (tab gone, bridge hiccup): nothing to check against, so the
+        // run's own word stands rather than looping on a job that may be finished.
+        const v = !page.trim() ? { ok: true, why: 'page unreadable; not checked' } : await checkDone({
+          kind: 'website', goal: p.task, claim: `${result.summary}${result.confirmation ? ` (confirmation: ${result.confirmation})` : ''}`,
+          evidence: `Final page (${result.url ?? 'url unknown'}):\n${page || '(could not read the page)'}`,
+        });
+        journal(jobId, 'check', v.ok ? `Verified: ${v.why}` : `NOT verified: ${v.why}`);
+        if (!v.ok) {
+          st.progress = [...st.progress, `Run ${st.runs} (said done, but the checker says not yet: ${v.why}): ${result.summary}`].slice(-10);
+          saveState(actionId, st);
+          result = { ...result, status: 'failed', summary: `Not confirmed yet: ${v.why}` };
+          if (st.runs < MAX_RUNS()) continue;
+          break;
+        }
       }
       if (result.status === 'done' || result.status === 'blocked') break;
       if (result.status === 'in_progress') {
@@ -543,6 +563,13 @@ let hostReader: () => Promise<string | null> = async () => {
   const out = String(await browserTools[0].handler({ action: 'get_current_url' }, { groupKey: 'booking' }));
   try { return new URL((JSON.parse(out) as { url?: string }).url ?? '').hostname; } catch { return null; }
 };
+/** The job tab's visible text, for the checker. */
+let pageTextReader: () => Promise<string> = async () => {
+  const { quietCommandInGroupTab } = await import('./tools/browser.js');
+  const r = await quietCommandInGroupTab('booking', 'extract_text', { selector: 'body' });
+  return String((r as { text?: unknown }).text ?? JSON.stringify(r)).slice(0, 8000);
+};
+export function setWebTaskPageTextReader(fn: (() => Promise<string>) | null): void { if (fn) pageTextReader = fn; }
 /** Tests swap in a fake page host. */
 export function setWebTaskHostReader(fn: (() => Promise<string | null>) | null): void {
   if (fn) hostReader = fn;

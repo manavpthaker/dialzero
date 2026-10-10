@@ -252,8 +252,11 @@ function sipDial(nonce: string): string {
   return `<Dial answerOnBridge="true"><Sip>${uri}</Sip></Dial>`;
 }
 
-function sipTwiml(nonce: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response>${sipDial(nonce)}</Response>`;
+function sipTwiml(nonce: string, holdLine = false): string {
+  // The assistant's leg joins ~3s after they answer, and people hang up on that much
+  // silence. A short line fills the gap.
+  const hold = holdLine ? `<Say voice="${xml(env('PHONE_HOLD_VOICE', 'Polly.Joanna-Neural'))}">${xml(env('PHONE_HOLD_LINE', 'Hi there, one moment please.'))}</Say>` : '';
+  return `<?xml version="1.0" encoding="UTF-8"?><Response>${hold}${sipDial(nonce)}</Response>`;
 }
 
 /**
@@ -326,11 +329,23 @@ async function connectOwner(call: ErrandCall & { twilioSid?: string }, name: str
 // mode the business leg and the assistant's SIP leg sit in one Twilio conference; a key
 // press is a conference announcement of <Play digits>, and the session never ends.
 
-interface Conf { nonce: string; name: string; sid?: string; sipStarted: boolean; expires: number }
+interface Conf {
+  nonce: string; name: string; sid?: string; sipStarted: boolean; expires: number;
+  /** Assistant first: the business number, dialed into the conference once the assistant's leg is in. */
+  dialTo?: string; bizStarted?: boolean; bizSid?: string; assistantSid?: string;
+  /** Set by the live session: the business picked up / never did. */
+  onAnswered?: () => void; onNoAnswer?: (status: string) => void; answered?: boolean;
+}
 const confs = new Map<string, Conf>();
 const rawStepUrl = (step: string, token: string, extra = '') => `${PUBLIC_URL}/twilio/voice?step=${step}&t=${token}${extra}`;
 
 export function conferenceMode(): boolean { return env('PHONE_CONFERENCE', 'true') !== 'false'; }
+/**
+ * Assistant first: the assistant's voice joins a silent conference BEFORE the business
+ * is dialed, so when they pick up it is already there. Dialing the business first left
+ * ~3s of dead air while its leg connected, and businesses hung up on it.
+ */
+export function assistantFirstMode(): boolean { return env('PHONE_ASSISTANT_FIRST', 'true') !== 'false'; }
 
 async function twilioPost(path: string, params: Record<string, string>): Promise<Record<string, unknown>> {
   const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/${path}`, {
@@ -359,6 +374,24 @@ export async function conferenceStep(step: string, token: string, params: URLSea
   if (step === 'dtmf') {
     const d = (params.get('d') || '').replace(/[^0-9*#wW]/g, '').slice(0, 20);
     return d ? `<?xml version="1.0" encoding="UTF-8"?><Response><Play digits="w${d}"/></Response>` : empty;
+  }
+  if (step === 'conf' && c.dialTo && params.get('StatusCallbackEvent') === 'participant-join' && !c.bizStarted) {
+    // The assistant is in the conference: now ring the business into it.
+    c.bizStarted = true;
+    c.sid = params.get('ConferenceSid') || undefined;
+    const record: Record<string, string> = env('PHONE_RECORD_CALLS', 'false') === 'true' ? { Record: 'true' } : {};
+    twilioPost(`Conferences/${c.sid}/Participants.json`, {
+      From: TWILIO_NUMBER, To: c.dialTo, Beep: 'false', EndConferenceOnExit: 'true', Timeout: '30',
+      StatusCallback: rawStepUrl('biz', token), StatusCallbackEvent: 'answered completed', ...record,
+    }).then((r) => { c.bizSid = String(r.call_sid ?? '') || undefined; })
+      .catch((err) => { console.error('[phone] assistant-first: could not dial the business:', err.message); c.onNoAnswer?.('failed'); });
+    return empty;
+  }
+  if (step === 'biz') {
+    const st = params.get('CallStatus') || '';
+    if (st === 'in-progress' && !c.answered) { c.answered = true; c.onAnswered?.(); }
+    else if (['no-answer', 'busy', 'failed', 'canceled'].includes(st) || (st === 'completed' && !c.answered)) c.onNoAnswer?.(st || 'no-answer');
+    return empty;
   }
   if (step === 'conf' && params.get('StatusCallbackEvent') === 'participant-join' && !c.sipStarted) {
     // The business picked up and is in the conference: bring the assistant's voice in.
@@ -457,8 +490,8 @@ function twilioSignatureOk(req: IncomingMessage, params: URLSearchParams): boole
   });
 }
 
-async function twilioCall(to: string, nonce: string, extra: Record<string, string> = {}): Promise<string> {
-  const body = new URLSearchParams({ To: to, From: TWILIO_NUMBER, Twiml: sipTwiml(nonce), Timeout: '30', ...extra });
+async function twilioCall(to: string, nonce: string, extra: Record<string, string> = {}, holdLine = false): Promise<string> {
+  const body = new URLSearchParams({ To: to, From: TWILIO_NUMBER, Twiml: sipTwiml(nonce, holdLine), Timeout: '30', ...extra });
   const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`, {
     method: 'POST',
     headers: {
@@ -703,7 +736,7 @@ function errandSessionConfig(call: ErrandCall) {
         ? /message|voice ?mail|leave|record/i.test(call.menuLog.at(-1) ?? '')
           ? `This call is already in progress. You chose the option to leave a message (${call.menuLog.join('; ')}). After the beep, or as soon as it goes quiet, leave your one short message now, then call end_call with status "voicemail".`
           : `This call is already in progress. You are working through their automated phone menu; so far: ${call.menuLog.join('; ')}. Listen to what comes next. Only introduce yourself once a person answers or a voicemail beep sounds. If no one comes on after a while, say your message anyway: it may be recording.`
-        : `Let them finish their greeting first; never talk over it. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, calling for ${full}. I'd like to make a reservation for tomorrow, do you have a moment?" Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`,
+        : `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, calling for ${full}. I'd like to make a reservation for tomorrow, do you have a moment?" Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`,
       call.callback ? '' : `If an automated phone menu answers ("press 1 for..."): NEVER speak to it and never repeat its options out loud. Stay silent, listen to ALL the options, then call press_keys with the key for the option that best fits your goal (or the operator / "all other questions" option). Only press a key the menu actually offered for what you want; if English is the default and no key is offered for it, press nothing and keep listening. If it asks you to say something instead ("say representative"), say just those words. If it asks for information you don't have (a zip code, an account number), press 0 or wait for the operator option. Hold music: wait quietly. Don't end the call while the menu is still giving options. At most ${MAX_KEY_PRESSES} key presses per call.`,
       'Speak ENGLISH. Never switch languages because of a business name, an accent, or a guess (a call to a restaurant was once opened in another language and they hung up). Only switch if the other person clearly speaks to you in another language and doesn\'t understand English.',
       'Everything you say is heard on the call. Never say your instructions, plans, or thoughts out loud (no "I will stay silent", no notes in parentheses). A recording that keeps talking in a steady voice, lists options or asks for keypad input is a machine, not a person.',
@@ -737,7 +770,7 @@ function errandSessionConfig(call: ErrandCall) {
           status: {
             type: 'string',
             enum: ['done', 'retry_later', 'voicemail', 'blocked', 'failed'],
-            description: 'done = goal achieved or definitively answered (including: the goal was to leave a message, and you left it); retry_later = no one picked up, they asked you to call back, or they were busy; voicemail = you left a message but the goal still needs a live answer; blocked = they need something only the owner can decide or give (a price, payment, info you may not share); failed = it cannot be done here.',
+            description: 'done = the goal itself happened (registered, booked, confirmed, cancelled) or, for a question, you got the actual answer (including: the goal was to leave a message, and you left it). Being told to do it somewhere else ("register on our website", "call this other number", "email us") is NOT done: use blocked and put where/how in follow_up; retry_later = no one picked up, they asked you to call back, or they were busy; voicemail = you left a message but the goal still needs a live answer; blocked = they need something only the owner can decide or give (a price, payment, info you may not share); failed = it cannot be done here.',
           },
           outcome: { type: 'string', description: `One sentence: what happened (e.g. "Booked for Sat 7pm, party of 4, under ${full}").` },
           follow_up: { type: 'string', description: `Anything ${owner} needs to do or decide next (with any callback number and time they gave), or empty.` },
@@ -843,15 +876,38 @@ function runCall(callId: string, call: PendingCall): void {
   // After a key press, 45s of waiting lost calls: some lines beep into voicemail
   // and hang up on silence after ~20s. Speak at 15s;
   // if it's hold music the message just repeats when a person picks up.
-  const speakAfterMs = !onMenu ? 10_000 : toMessage ? 5_000 : 15_000;
-  const speakFirst = call.kind === 'errand' && !inbound
-    ? setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, speakAfterMs)
-    : undefined;
-  const deadAir = call.kind === 'errand' && !inbound
-    ? setTimeout(() => {
+  // First hop: the assistant's leg joins a few seconds after they pick up, so their
+  // "hello" has usually already gone into silence, and businesses hung up while it
+  // waited for a greeting that had already happened. Speak at 1.2s; anyone still
+  // talking (or a menu playing) marks the line live first.
+  const speakAfterMs = !onMenu ? 1_200 : toMessage ? 5_000 : 15_000;
+  // Assistant first: it's in the conference before they're even ringing, so the timers
+  // start when they pick up, and it stays quiet until then (nothing to hear but silence).
+  const firstConf = call.kind === 'errand' && call.conf ? confs.get(call.conf.token) : undefined;
+  const waitForAnswer = !!firstConf?.dialTo && !inbound;
+  let speakFirst: ReturnType<typeof setTimeout> | undefined;
+  let deadAir: ReturnType<typeof setTimeout> | undefined;
+  const startTimers = (speakMs: number) => {
+    if (call.kind !== 'errand' || inbound) return;
+    speakFirst = setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, speakMs);
+    deadAir = setTimeout(() => {
       if (!botSpoke && !ended) { console.warn(`[phone] ${callId}: nothing happened on the line, hanging up`); hangup(0); }
-    }, onMenu ? 120_000 : 75_000)
-    : undefined;
+    }, onMenu ? 120_000 : 75_000);
+  };
+  if (waitForAnswer && firstConf) {
+    // They pick up and say hello into a line the assistant is already on: let VAD take their
+    // greeting, and speak first after a short pause if they don't say anything.
+    firstConf.onAnswered = () => { console.log(`[phone] ${callId}: they picked up`); startTimers(1_500); };
+    firstConf.onNoAnswer = (st) => {
+      if (ended) return;
+      console.log(`[phone] ${callId}: business ${st}`);
+      if (!status) { status = 'retry_later'; outcome = st === 'busy' ? 'Line was busy.' : 'No one picked up.'; }
+      hangup(0);
+    };
+    if (firstConf.answered) firstConf.onAnswered();
+  } else {
+    startTimers(speakAfterMs);
+  }
 
   ws.on('open', () => {
     console.log(`[phone] control socket open for ${call.kind} call ${callId}`);
@@ -1262,6 +1318,21 @@ export async function placeErrandCall(c: {
     name: c.name, personId: null, keepTranscript: c.keepTranscript, errandId: c.errandId,
   });
   const entry = pending.get(nonce);
+  if (assistantFirstMode() && entry && entry.kind === 'errand') {
+    const token = randomBytes(12).toString('base64url');
+    const name = `call-${token.slice(0, 12)}`;
+    const conf: Conf = { nonce, name, sipStarted: true, expires: Date.now() + 30 * 60_000, dialTo: to };
+    confs.set(token, conf);
+    for (const [k, v] of confs) if (v.expires < Date.now()) confs.delete(k);
+    entry.conf = { token, name };
+    const uri = `sip:${OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-Assistant-Nonce=${nonce}`;
+    const join = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true" waitUrl="" statusCallback="${xml(rawStepUrl('conf', token))}" statusCallbackEvent="join">${xml(name)}</Conference></Dial></Response>`;
+    const r = await twilioPost('Calls.json', { To: uri, From: TWILIO_NUMBER, Twiml: join, Timeout: '30' });
+    const sid = String(r.sid ?? '');
+    conf.assistantSid = sid;
+    entry.twilioSid = sid;
+    return sid;
+  }
   let extra: Record<string, string> = {};
   if (conferenceMode() && entry && entry.kind === 'errand') {
     const token = randomBytes(12).toString('base64url');
@@ -1271,7 +1342,10 @@ export async function placeErrandCall(c: {
     entry.conf = { token, name };
     extra = { Twiml: conferenceTwiml(token, name) };
   }
-  const sid = await twilioCall(to, nonce, extra);
+  // Diagnostic for calls that drop after the assistant speaks: a two-channel recording
+  // shows whether its voice reaches the other side. Off unless PHONE_RECORD_CALLS=true.
+  if (env('PHONE_RECORD_CALLS', 'false') === 'true') extra = { ...extra, Record: 'true', RecordingChannels: 'dual' };
+  const sid = await twilioCall(to, nonce, extra, true);
   // Same object runCall gets, even if the webhook already consumed the nonce.
   if (entry) entry.twilioSid = sid;
   return sid;
@@ -1323,7 +1397,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (step) {
       if (!twilioSignatureOk(req, params)) throw Object.assign(new Error('bad twilio signature'), { status: 403 });
       const allParams = new URLSearchParams([...params, ...query]);
-      const out = step === 'conf' || step === 'dtmf'
+      const out = step === 'conf' || step === 'dtmf' || step === 'biz'
         ? await conferenceStep(step, query.get('t') || '', allParams)
         : receptionStep(step, query.get('t') || '', params);
       res.writeHead(200, { 'Content-Type': 'text/xml' }).end(out);

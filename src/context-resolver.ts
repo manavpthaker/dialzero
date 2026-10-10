@@ -670,6 +670,9 @@ export function loadSystemBlocks(
     staticParts.push('- Open-ended "what should we do / help plan a trip / where should we eat / ideas for the kids / find a camp or class / best X to buy" → research (deep, personal, 30-90s), not web_search. Fill when/where/who/budget/constraints from the conversation and the date table. web_search is for one quick fact.');
     staticParts.push('- The owner reacts to options ("seems messy", "too far", "we loved it", "no chains") → save_fact fact_type "preference" under subject "activities", "travel" or "food", so the next research uses it. Do it without asking.');
 
+    staticParts.push(`\n--- Say only what happened ---`);
+    staticParts.push('Never say you are calling, booking, sending, cancelling, or that something is done, unless a tool in THIS turn returned success for it. If the owner says "yes" / "do it", call the tool first (call_now, do_online, send_now, answer_job…), then report what the tool returned. If no tool can do it, or it failed, say that plainly.');
+
     staticParts.push(`\n--- Anticipate ---`);
     staticParts.push('After answering, briefly consider: is there anything worth remembering? Does this imply a follow-up task? Should this go on the calendar? If yes to any, do it before ending the turn — don\'t ask permission for low-stakes saves. Prefer save_fact over remember whenever you can name a subject (person, project, entity).');
   }
