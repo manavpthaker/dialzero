@@ -20,6 +20,8 @@ import { pushTaskToGoogle } from './sync/tasks-sync.js';
 import { extractFirstJson, extractionComplete, makeLogger } from './lib/daemon.js';
 import { parseBoolEnv, parseNumEnv, parseStrEnv } from './lib/env.js';
 import { OPENAI_MODEL } from './lib/openai.js';
+import { getProfileConfig } from './config.js';
+import dbh from './db.js';
 
 const OMI_URL = 'https://api.omi.me/v1/mcp';
 const MEM_GROUP = 'omi';
@@ -34,6 +36,10 @@ export interface OmiExtract {
   todos?: Array<{ title: string; due?: string | null }>;
   people?: Array<{ name: string; note?: string }>;
   decisions?: Array<{ subject?: string; text: string }>;
+  /** Someone else in the recording (a partner talking about their own work) talking about THEIR life: kept as facts about them. */
+  others?: Array<{ person: string; text: string }>;
+  /** Useful things the owner watched or listened to (tutorials, reviews, talks), kept to look up later. */
+  watched?: Array<{ source?: string; topic: string; takeaways: string[] }>;
 }
 
 export interface OmiDeps {
@@ -90,7 +96,8 @@ export function parseCards(text: string): OmiCard[] {
       id,
       title: str(c.title) || str(s.title) || 'a conversation',
       when: str(c.finished_at) || str(c.started_at) || str(c.created_at) || '',
-      discarded: c.discarded === true,
+      // TV/YouTube the desktop app overheard (Omi tags it "entertainment"): nothing of the owner's in it.
+      discarded: c.discarded === true || str(s.category) === 'entertainment',
     }];
   });
 }
@@ -103,21 +110,55 @@ function markSeen(ids: string[]): void {
   setMemory(MEM_GROUP, SEEN_KEY, JSON.stringify(all.slice(-SEEN_MAX)));
 }
 
+/**
+ * Who lives with the owner, and what's known about their work, so a recording where a
+ * partner talks about THEIR job isn't filed as the owner's (Omi sometimes labels another
+ * household voice as the user; their colleagues became the owner's contacts and their
+ * follow-ups became the owner's tasks).
+ */
+export function householdContext(): string {
+  let members: string[] = [];
+  try { members = (getProfileConfig().members ?? []).map((m) => (m as { name?: string }).name ?? '').filter(Boolean); } catch { /* no profile */ }
+  if (!members.length) return '';
+  const db = dbh as unknown as { prepare: (s: string) => { all: (...a: unknown[]) => unknown[] } };
+  const lines = members.map((name) => {
+    const first = name.split(/\s+/)[0].toLowerCase();
+    const known = db.prepare(`SELECT predicate, object FROM facts WHERE active = 1 AND (lower(subject) = ? OR lower(subject) LIKE ?) AND (predicate LIKE 'work%' OR predicate LIKE '%colleague%' OR predicate LIKE 'job%') ORDER BY id DESC LIMIT 4`)
+      .all(name.toLowerCase(), `${first} %`) as Array<{ predicate: string; object: string }>;
+    return `- ${name}${known.length ? `: ${known.map((k) => `${k.predicate}: ${k.object}`).join('; ').slice(0, 300)}` : ''}`;
+  });
+  return `\nPeople who live with the owner (their voices are often in these recordings, and Omi sometimes labels them as the owner):\n${lines.join('\n')}\n`;
+}
+
+/** "Alex" → the full name on their contact record ("alex rivera"), so facts stay on one person. */
+function fullName(name: string): string {
+  const n = name.trim().toLowerCase();
+  if (n.includes(' ')) return n;
+  const db = dbh as unknown as { prepare: (s: string) => { get: (...a: unknown[]) => unknown } };
+  const row = db.prepare(`SELECT name FROM people WHERE lower(name) LIKE ? ORDER BY id LIMIT 1`).get(`${n} %`) as { name?: string } | undefined;
+  return (row?.name ?? n).toLowerCase();
+}
+
 export function extractPrompt(card: OmiCard, transcript: string, today: string): string {
-  return `This is one conversation Omi recorded on the owner's phone/computer ("${card.title}"${card.when ? `, ${card.when}` : ''}). In the transcript the owner is the speaker marked as the user (is_user true / "You" / "user"); everyone else is someone they were talking to, or audio around them (TV, podcast, video, a call on speaker). Reply with JSON only, no prose.
+  return `This is one conversation Omi recorded on the owner's phone/computer ("${card.title}"${card.when ? `, ${card.when}` : ''}). In the transcript the owner is the speaker marked as the user (is_user true / "You" / "user"); everyone else is someone they were talking to, or audio around them (TV, podcast, video, a call on speaker).${householdContext()}
+Reply with JSON only, no prose.
 
 {
   "commitments": [{"counterpart": "who they promised", "text": "what THE OWNER said they'd do"}],
   "todos": [{"title": "a concrete thing THE OWNER must do", "due": "YYYY-MM-DD or null"}],
   "people": [{"name": "a real person they actually talked with or about", "note": "one short line on what they discussed"}],
-  "decisions": [{"subject": "topic", "text": "what was decided"}]
+  "decisions": [{"subject": "topic", "text": "what was decided"}],
+  "others": [{"person": "full name of the household member (or other named speaker)", "text": "what they said about THEIR own work or life worth remembering: colleagues, projects, goals, worries, events"}],
+  "watched": [{"source": "what it was, e.g. 'YouTube interview on gel-supported 3D printing'", "topic": "2-5 word subject", "takeaways": ["specific point, number, name, product or how-to step worth remembering"]}]
 }
 
 Rules:
-- Only what the owner themselves said or agreed to. Skip promises made to them, and skip anything from media, ads, or background audio.
+- WHO IS SPEAKING: if the main speaker is clearly someone else, even when Omi labels them as the user (e.g. a partner on a call with THEIR boss about THEIR team, goals and colleagues), it is NOT the owner's: put it under "others" with that person's name and leave commitments/todos/people/decisions empty for those parts. Their colleagues are not the owner's contacts; their follow-ups are not the owner's tasks.
+- commitments/todos/people/decisions: only what the owner themselves said or agreed to, about their own life and work. Skip promises made to them, and anything from media, ads, or background audio.
+- watched: the one exception for media. When the audio is something USEFUL the owner watched or listened to (a tutorial, how-to, product or film review, product demo, talk, interview, lecture, news analysis), add one item per piece with 2-6 concrete takeaways they could want to look up later. NEVER for TV shows, movies, dramas, sketches, comedy, music or ads: skip those entirely.
 - todos: ONLY when the owner explicitly commits to or asks for a reminder about a real errand or piece of work ("remind me to…", "I need to call…", "I'll send the deck Friday"). NEVER household moment-to-moment instructions or chores said in passing (shower, floss, laundry, "get it over there", "put that back"), things said to or about a child, or things someone else will do. Resolve relative dates against today (${today}); no date → null. If in doubt, leave it out: most conversations have zero todos.
 - people: real names only. Skip the owner, celebrities, and people only heard on media.
-- Omit any empty section. If nothing durable happened (small talk, a show playing), reply {}.
+- Omit any empty section. If nothing durable happened (small talk, a show or movie playing), reply {}.
 
 TRANSCRIPT:
 ${transcript.slice(0, TRANSCRIPT_CHARS)}`;
@@ -144,6 +185,18 @@ export function writeBack(parsed: OmiExtract, card: OmiCard): { facts: number; t
     const task = getTaskById(id);
     if (task) deps.pushTask(task).catch((err) => log(`google task push failed: ${err}`));
     out.tasks++;
+  }
+  for (const o of parsed.others ?? []) {
+    if (!o.person?.trim() || !o.text?.trim()) continue;
+    saveFact({ subject: fullName(o.person), predicate: 'said (recorded)', object: o.text.trim(), fact_type: 'fact', source: 'omi', source_ref: ref, sensitive: true });
+    out.facts++;
+  }
+  for (const w of parsed.watched ?? []) {
+    const points = (w.takeaways ?? []).map((t) => String(t).trim()).filter(Boolean).slice(0, 6);
+    if (!w.topic?.trim() || !points.length) continue;
+    // Not personal, so not sensitive: "what was that 3D printing video?" should find it.
+    saveFact({ subject: w.topic.trim().toLowerCase(), predicate: `watched: ${(w.source || card.title).trim().slice(0, 120)}`, object: points.join('; '), fact_type: 'reference', source: 'omi-media', source_ref: ref, sensitive: false });
+    out.facts++;
   }
   for (const p of parsed.people ?? []) {
     if (!p.name?.trim()) continue;

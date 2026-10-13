@@ -712,6 +712,19 @@ function receptionSessionConfig(call: ErrandCall) {
   };
 }
 
+/**
+ * Assistant first: how long after they pick up before the assistant speaks if they haven't.
+ * 1.5s was shorter than most "Hello, Example Construction?" greetings: the assistant talked
+ * over them, their voice cut it off, and it restarted the intro; most hung up.
+ */
+export const PICKUP_SPEAK_MS = 3_000;
+
+/** The opener rule for outbound errand calls (exported for tests). */
+export function openerRule(bot: string, full: string): string {
+  return `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, calling for ${full}. I'd like to make a reservation for tomorrow, do you have a moment?" Introduce yourself ONCE per call: if they talk over you or say "hello?" again, never restart the intro; say "Hi, yes!" and ask your question in a few words. Never say "thanks for holding" unless they actually put you on hold. Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone.
+ONE QUESTION PER TURN: ask one thing, then stop talking and wait for their full answer before the next. Never stack questions in one breath (a hotel desk got four questions at once and the call ended with none answered). Sound like a friendly person, not a checklist: react to what they say ("oh perfect, thank you", "got it"), let small talk happen, and work the next question in naturally. If an answer already covers a later question, don't ask it. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`;
+}
+
 function errandSessionConfig(call: ErrandCall) {
   if (call.reception) return receptionSessionConfig(call);
   const o = getOwner();
@@ -736,7 +749,7 @@ function errandSessionConfig(call: ErrandCall) {
         ? /message|voice ?mail|leave|record/i.test(call.menuLog.at(-1) ?? '')
           ? `This call is already in progress. You chose the option to leave a message (${call.menuLog.join('; ')}). After the beep, or as soon as it goes quiet, leave your one short message now, then call end_call with status "voicemail".`
           : `This call is already in progress. You are working through their automated phone menu; so far: ${call.menuLog.join('; ')}. Listen to what comes next. Only introduce yourself once a person answers or a voicemail beep sounds. If no one comes on after a while, say your message anyway: it may be recording.`
-        : `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, calling for ${full}. I'd like to make a reservation for tomorrow, do you have a moment?" Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`,
+        : openerRule(bot, full),
       call.callback ? '' : `If an automated phone menu answers ("press 1 for..."): NEVER speak to it and never repeat its options out loud. Stay silent, listen to ALL the options, then call press_keys with the key for the option that best fits your goal (or the operator / "all other questions" option). Only press a key the menu actually offered for what you want; if English is the default and no key is offered for it, press nothing and keep listening. If it asks you to say something instead ("say representative"), say just those words. If it asks for information you don't have (a zip code, an account number), press 0 or wait for the operator option. Hold music: wait quietly. Don't end the call while the menu is still giving options. At most ${MAX_KEY_PRESSES} key presses per call.`,
       'Speak ENGLISH. Never switch languages because of a business name, an accent, or a guess (a call to a restaurant was once opened in another language and they hung up). Only switch if the other person clearly speaks to you in another language and doesn\'t understand English.',
       'Everything you say is heard on the call. Never say your instructions, plans, or thoughts out loud (no "I will stay silent", no notes in parentheses). A recording that keeps talking in a steady voice, lists options or asks for keypad input is a machine, not a person.',
@@ -747,7 +760,7 @@ function errandSessionConfig(call: ErrandCall) {
       `Never give out card numbers, bank details, Social Security numbers, passwords, or PINs. Never agree to a charge, contract, cancellation fee, or anything beyond the goal; say ${owner} will confirm.`,
       `If you reach voicemail, leave one short message: who you are (${bot}, an AI assistant for ${full}), the reason for the call${callback ? `, and the callback number ${callback.split('').join(' ')}` : ''}, then end the call.`,
       "If you book anything (an appointment, reservation, pickup, visit), repeat the day and time back to them, ask for a confirmation number if they have one, and fill in end_call's booking.",
-      `Keep notes like a good assistant. When a person gives you information, an answer, or a commitment, ask for their name before you hang up ("And who am I speaking with, in case we follow up?"). Note any ticket, case or confirmation number, a direct line or extension, and anything they said they'd do and by when. Put all of it in end_call's notes. If the goal mentions earlier calls to this place, refer to them naturally ("Pat mentioned on Monday that…") instead of starting from scratch.`,
+      `Keep notes like a good assistant. When a person gives you information, an answer, or a commitment, ask for their name casually at the very end, after the main thing is settled ("Thanks so much, and what's your name, in case I need to call back?"); never bundle it with another question. Note any ticket, case or confirmation number, a direct line or extension, and anything they said they'd do and by when. Put all of it in end_call's notes. If the goal mentions earlier calls to this place, refer to them naturally ("Pat mentioned on Monday that…") instead of starting from scratch.`,
       'When the goal is done or clearly cannot be done, say thank you and goodbye, then call end_call with what happened.',
     ].filter(Boolean).join('\n'),
     tools: [...(call.callback ? [] : [{
@@ -897,7 +910,7 @@ function runCall(callId: string, call: PendingCall): void {
   if (waitForAnswer && firstConf) {
     // They pick up and say hello into a line the assistant is already on: let VAD take their
     // greeting, and speak first after a short pause if they don't say anything.
-    firstConf.onAnswered = () => { console.log(`[phone] ${callId}: they picked up`); startTimers(1_500); };
+    firstConf.onAnswered = () => { console.log(`[phone] ${callId}: they picked up`); startTimers(PICKUP_SPEAK_MS); };
     firstConf.onNoAnswer = (st) => {
       if (ended) return;
       console.log(`[phone] ${callId}: business ${st}`);

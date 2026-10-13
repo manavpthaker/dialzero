@@ -81,6 +81,16 @@ try {
     assert.equal(phone.isFictionalNumber('+12125552368'), false);
   });
 
+  await check('opener: wait out their greeting, introduce once, no "thanks for holding"', () => {
+    assert.ok(phone.PICKUP_SPEAK_MS >= 2_500, 'speak-first after pickup must outlast a normal greeting');
+    const rule = phone.openerRule('Assistant', 'Alex Rivera');
+    assert.match(rule, /let them finish their greeting/);
+    assert.match(rule, /Introduce yourself ONCE/);
+    assert.match(rule, /never restart the intro/);
+    assert.match(rule, /Never say "thanks for holding"/);
+    assert.match(rule, /ONE QUESTION PER TURN/);
+  });
+
   await check('call_now only skips the gate for the owner\'s own words asking for a call', async () => {
     const { ownerAskedForCall } = await import('../src/tools/errands.js');
     const msg = 'Call springfield waste management they haven\'t picked up our grass clippings, leave a message with my address';
