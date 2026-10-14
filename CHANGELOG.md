@@ -9,6 +9,7 @@ Dial Zero's code is ported most nights from the author's own assistant, so `main
 - **Updating.** Say "update me" in Claude Code or Codex. It pulls the latest code, keeps your personal files, rebuilds, restarts the background service, re-runs the checker and tells you what changed. A folder downloaded as a ZIP can be turned into one that updates, in place.
 - **SECURITY.md.** What the approval gate stops, what it doesn't, and how to report a problem privately.
 - **Issue forms** for "Setup got stuck" and "A call went wrong". Setup questions point to Discussions.
+- **CONTRIBUTING** explains that code is ported nightly from the author's own assistant, so pull requests are welcome but re-applied by hand, and lists the most useful first contributions.
 
 ## v0.1.0 (2026-10-20)
 
