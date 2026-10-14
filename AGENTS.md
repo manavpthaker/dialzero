@@ -13,6 +13,10 @@ Follow [setup/GUIDE.md](setup/GUIDE.md) step by step. The person is probably not
 
 The same applies to "turn on <feature>", "add phone calls", "set up the family chat": find the matching step in the guide.
 
+## If the user says "update me"
+
+Follow "Updating" at the end of [setup/GUIDE.md](setup/GUIDE.md): pull the latest code, keep their personal files (they're gitignored), rebuild, restart the background service, re-run the checker, and tell them in plain words what changed (`CHANGELOG.md`). Never throw away their changes or force anything without asking. A folder downloaded as a ZIP can't pull; the guide shows how to turn it into one that can.
+
 ## For code changes
 
 Read `CLAUDE.md` for the project layout, commands and rules (they apply to any agent). Key points: imports use `.js` extensions, never write to `chat.db`, keep personal data out of the repo, use `getTimezone()` for times, and route proactive messages through `src/cos-outbound.ts`. Typecheck with `npm run build`; tests are `npm run test:<name>` (see `package.json`).
