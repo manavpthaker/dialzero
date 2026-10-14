@@ -129,16 +129,23 @@ Use start_errand instead when it will take calling around or several tries over 
       if (isFictionalNumber(dial)) return `Not calling: ${i.phone} is a made-up 555-01xx number. Look up the real number or ask the owner for it.`;
       // Already calling them? A second request ("call them again", "leave a
       // voicemail") goes to that errand instead of dialing the same number twice.
+      // Same place by number, or by name (a hotel's reservations line vs its front desk).
+      const placeWords = (n: string) => new Set(n.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !/^(the|hotel|front|desk|reservations?|office|main|line|inc|llc|and|restaurant|store)$/.test(w)));
+      const want = placeWords(String(i.name ?? ''));
       const same = listErrands({ open: true, limit: 20 }).find((r) => {
-        try { return (JSON.parse(r.envelope_json) as { targets: Array<{ phone: string }> }).targets.some((t) => t.phone.slice(-10) === dial.slice(-10)); } catch { return false; }
+        try {
+          return (JSON.parse(r.envelope_json) as { targets: Array<{ phone: string; name?: string }> }).targets.some((t) => {
+            if (t.phone.slice(-10) === dial.slice(-10)) return true;
+            const have = placeWords(t.name ?? '');
+            return [...want].filter((w) => have.has(w)).length >= Math.min(2, want.size) && want.size > 0;
+          });
+        } catch { return false; }
       });
       if (same) {
         const note = String(i.owner_request).trim();
         if (same.status === 'waiting') extendErrand(same.id, 2, true);
         addErrandNote(same.id, note);
-        return same.status === 'waiting'
-          ? `Already had a call going to ${i.name}; added the owner's words ("${note}") and it's calling again now. Tell the owner in one line.`
-          : `Already calling ${i.name}; added the owner's words ("${note}") to that call. Tell the owner in one line; don't start another.`;
+        return `There's already a call set up to ${i.name} for: "${same.goal.slice(0, 300)}". ${same.status === 'waiting' ? `Added the owner's words ("${note}") and it's calling again now.` : `Added the owner's words ("${note}") to it; don't start another.`} Tell the owner in one line what it's for, in those words. Don't invent another purpose.`;
       }
       const prepared = prepareErrand({
         goal: i.goal, targets: [{ name: i.name, phone: dial, hours: i.hours }], share: i.share ?? '', max_calls: 2,

@@ -21,6 +21,7 @@ import { extractFirstJson, extractionComplete, makeLogger } from './lib/daemon.j
 import { parseBoolEnv, parseNumEnv, parseStrEnv } from './lib/env.js';
 import { OPENAI_MODEL } from './lib/openai.js';
 import { getProfileConfig } from './config.js';
+import { similarOpenTask } from './lib/task-dedupe.js';
 import dbh from './db.js';
 
 const OMI_URL = 'https://api.omi.me/v1/mcp';
@@ -180,6 +181,7 @@ export function writeBack(parsed: OmiExtract, card: OmiCard): { facts: number; t
   }
   for (const t of parsed.todos ?? []) {
     if (!t.title?.trim()) continue;
+    if (similarOpenTask(t.title)) continue; // heard again in another recording: already on the list
     const due = t.due && /^\d{4}-\d{2}-\d{2}$/.test(t.due) ? t.due : undefined;
     const id = createTask({ title: t.title.trim(), group_id: 'admin', assignee: 'owner', due_date: due, source: 'omi', source_ref: ref, sync_to_google: true, notes: `From a conversation Omi recorded: ${card.title}` });
     const task = getTaskById(id);

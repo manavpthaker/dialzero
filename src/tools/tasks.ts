@@ -1,4 +1,5 @@
 import { createTask, updateTaskStatus, getOpenTasks, getOverdueTasksAll, getTasksDueSoonAll, getTaskStats, getSchedulableTasks, updateTaskSchedule, clearTaskSchedule, getTaskById, snoozeTask, linkEmailOpenLoopTaskByMessageId, type Task } from '../db.js';
+import { similarOpenTask } from '../lib/task-dedupe.js';
 import type { ToolDef, ToolContext } from './index.js';
 import { isValidEmailMessageId } from '../email/source.js';
 import { getTimezone } from '../config.js';
@@ -66,6 +67,8 @@ export const taskTools: ToolDef[] = [
       if (source_message_id && !isValidEmailMessageId(source_message_id)) {
         throw new Error(`Invalid email source_message_id: ${source_message_id}`);
       }
+      const same = similarOpenTask(title);
+      if (same) return `Already on the owner's list as #${same.id}: "${same.title}"${same.due_date ? ` (due ${same.due_date.slice(0, 10)})` : ''}. Not added again. If the new details differ (date, person), use update_task on #${same.id}.`;
       const id = createTask({
         title,
         description,

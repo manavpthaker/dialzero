@@ -745,6 +745,7 @@ function errandSessionConfig(call: ErrandCall) {
         : `You are ${bot}, an AI assistant, making a phone call on behalf of ${full}${call.name ? ` to ${call.name}` : ''}.`,
       `Your goal: ${call.goal}`,
       call.context ? `Details you may share: ${call.context}` : '',
+      'NEVER make up a detail you were not given: no confirmation numbers, names, dates, amounts, room types or account numbers that are not written above. If they ask for something you don\'t have, say "I don\'t have that in front of me, can you look it up by the name?" If what they say doesn\'t match the goal (no such booking, a different place), say so, thank them, and end_call with status "blocked" explaining the mismatch.',
       call.callback ? returning : call.menuLog?.length
         ? /message|voice ?mail|leave|record/i.test(call.menuLog.at(-1) ?? '')
           ? `This call is already in progress. You chose the option to leave a message (${call.menuLog.join('; ')}). After the beep, or as soon as it goes quiet, leave your one short message now, then call end_call with status "voicemail".`
