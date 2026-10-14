@@ -8,6 +8,10 @@ Follow [setup/GUIDE.md](setup/GUIDE.md) step by step. The person is probably not
 
 The same applies to "turn on <feature>", "add phone calls", "set up the family chat", etc.: find the matching step in the guide.
 
+## If the user says "update me"
+
+Follow "Updating" at the end of [setup/GUIDE.md](setup/GUIDE.md): pull the latest code, keep their personal files (they're gitignored), rebuild, restart the background service, re-run the checker, and tell them in plain words what changed (`CHANGELOG.md`). Never throw away their changes or force anything without asking. A folder downloaded as a ZIP can't pull; the guide shows how to turn it into one that can.
+
 ## What this is
 
 A personal assistant people text over iMessage. It runs on their own Mac: it polls `~/Library/Messages/chat.db`, runs a tool-use agent on Claude or OpenAI (`LLM_PROVIDER`), and replies via AppleScript. Memory lives in a local SQLite file. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

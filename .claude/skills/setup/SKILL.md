@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Walk the user through installing and configuring their personal assistant on this Mac, step by step, in plain language. Use when they say "set me up", "install this", "help me get started", "turn on <feature>", or ask how to set up phone calls, the family chat, Google, or permissions.
+description: Walk the user through installing, configuring or updating their personal assistant on this Mac, step by step, in plain language. Use when they say "set me up", "install this", "help me get started", "turn on <feature>", "update me", or ask how to set up phone calls, the family chat, Google, or permissions.
 ---
 
 Follow `setup/GUIDE.md` in this folder.
@@ -10,3 +10,5 @@ Follow `setup/GUIDE.md` in this folder.
 3. Ask before installing anything or changing system settings. Never ask for a secret in the chat; open `.env` for them or run the command that prompts for it.
 4. No jargon. The person may never have used a terminal.
 5. Finish with a real text from their phone and a real reply.
+
+If they say "update me", follow "Updating" at the end of the guide instead: pull the latest, keep their personal files, rebuild, restart, re-run the checker, and say in plain words what changed.

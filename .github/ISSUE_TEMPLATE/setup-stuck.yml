@@ -1,0 +1,77 @@
+name: Setup got stuck
+description: Setup stopped, failed, or you can't tell what to do next.
+title: "Setup stuck: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sorry it got stuck. These details help find where.
+
+        Just a question, or not sure it's a bug? Ask under **Setup help** in the **Discussions** tab at the top of this page. Someone may have hit the same step. Found a security problem? Don't post it here; see `SECURITY.md`.
+
+        **Before you paste anything, remove what's personal:** API keys, tokens, passwords, phone numbers, email addresses and people's names.
+  - type: dropdown
+    id: step
+    attributes:
+      label: Where did it stop?
+      options:
+        - Getting the code (git clone, GitHub Desktop or ZIP)
+        - npm install
+        - Adding an API key
+        - npm run chat
+        - The interview (npm run onboard)
+        - Signing in to Messages
+        - Mac permissions (Full Disk Access, Automation, Accessibility)
+        - Connecting Google
+        - The first text
+        - The background service (npm run install:service)
+        - Phone calls (Twilio, Tailscale, the OpenAI webhook)
+        - Updating
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you saw. The exact error message helps most.
+    validations:
+      required: true
+  - type: textarea
+    id: checker
+    attributes:
+      label: Setup checker output
+      description: |
+        In the project folder, run `npm run doctor -- --setup --json` and paste the result. It names settings without their values, but it can include names, folder paths and error text, so read it and remove anything personal first.
+      render: json
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Apple menu, then About This Mac.
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: The output of `node -v`.
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Which AI runs it?
+      options:
+        - Claude (Anthropic)
+        - OpenAI
+        - Not chosen yet
+  - type: dropdown
+    id: helper
+    attributes:
+      label: How are you setting it up?
+      options:
+        - Claude Code ("set me up")
+        - Codex ("set me up")
+        - By hand in Terminal
+  - type: input
+    id: version
+    attributes:
+      label: Which version?
+      description: The release number, or the output of `git rev-parse --short HEAD`. Downloaded as a ZIP? Say so.

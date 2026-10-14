@@ -133,3 +133,34 @@ When it answers, they're done. Tell them the handful of things worth knowing:
 - It checks in twice a day if they turned check-ins on; otherwise it only speaks when spoken to or when something's urgent.
 - `npm run pause` / `npm run resume` quiets or wakes the background features.
 - They can come back to Claude and say "set me up" any time to turn on more features.
+
+---
+
+## Updating (when they say "update me")
+
+**Why:** fixes land in this project most nights. Updating pulls them in. It never touches their personal files: `.env`, `config/profile.json`, their own `context/` files, the database (`assistant.db`) and `data/` are all ignored by git.
+
+1. **Check the folder.** Run `git status`. If it says "not a git repository", the folder came from a ZIP: follow "A ZIP copy" below first, then come back to step 4.
+2. **Look for changes they made to the project's own files.** `git status --porcelain --untracked-files=no`. If anything is listed, tell them in plain words which files changed and ask what to do before going on. Never throw their changes away.
+3. **Pull the latest.** Note the current version with `git rev-parse --short HEAD`, then run `git pull --ff-only`. If git refuses (their copy has its own commits), stop and explain. Don't merge, reset or force anything without asking.
+4. **Rebuild.** `npm install`, then `npm run build`.
+5. **Restart.** If the background service is installed (the checker lists the `service` checks as `ok`), run `npm run restart`. If not, skip this.
+6. **Check.** Run `npm run doctor -- --setup --json`. If an update added a setting or a permission, it shows up here as not `ok`. Walk them through it like any setup step.
+7. **Say what changed.** Read the newest entries in `CHANGELOG.md` (and `git log --oneline <old version>..HEAD` for changes since the last release). Sum it up in two or three plain sentences. Don't paste a list of commits.
+
+### A ZIP copy
+
+A folder downloaded as a ZIP can't pull updates. Explain that, and offer to turn it into one that can, in place, keeping everything personal. Ask before you start.
+
+1. Make a safety copy of the whole folder next to it, for example `cp -R ~/dialzero-main ~/dialzero-main-backup` (use the real folder name).
+2. Get the project's address: on its GitHub page (dialzero.dev links to it), the HTTPS address under the green **Code** button. Ask them to copy it if you don't have it. Then, in the folder, run (with the address in place of `<address>`):
+   ```
+   git init -b main
+   git remote add origin <address>
+   git fetch origin
+   git reset --hard origin/main
+   git branch --set-upstream-to=origin/main
+   ```
+   This replaces the project's own files with the latest version. Files git ignores (the personal files listed above) stay exactly as they were.
+3. Run `git status --short`. Anything marked `??` is a file git doesn't know: something they added, or a file the old ZIP had that the project no longer uses. Show them the list and ask before moving any of it. Move, never delete.
+4. Continue with step 4 above.
