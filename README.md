@@ -28,7 +28,7 @@ Each step works on its own. Stop after any of them.
 | [2. Make it textable](#2-make-it-textable) | Text it from your phone; calendar, to-dos and email | About an hour | AI usage; guided setup uses your Claude Code or Codex plan |
 | [3. Add phone calls](#3-add-phone-calls) | It calls businesses for you and answers its own number | About 30 more minutes | A Twilio number and minutes, plus OpenAI's voice model |
 
-<!-- TODO(before launch): add one real cost line here from the author's own monthly API and Twilio bills, for example "The author's own setup, with calls, costs about $X a month." -->
+**What it costs:** you pay your AI provider per use, so the bill depends on how often you use it and which model you pick. Phone calls add a Twilio number ($1.15 a month), about 1.4 cents a minute for each call, and OpenAI's per-minute charge for the voice model. Set a spending limit with each provider.
 
 ### 1. Try it in 10 minutes
 
