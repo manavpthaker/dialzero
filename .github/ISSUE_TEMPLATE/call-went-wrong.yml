@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting this. Calls are the hardest part to get right, and real cases are how they get better.
+        Thanks for reporting this. Calls are the hardest part to get right, and real cases are how they get better. Found a security problem? Don't post it here; see `SECURITY.md`.
 
         **Keep other people out of it.** Don't name the business or the person who answered, and remove phone numbers, reference numbers, your name and your address. "A dentist's front desk" is plenty. Please don't attach call recordings.
   - type: dropdown

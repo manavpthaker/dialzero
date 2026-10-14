@@ -153,10 +153,10 @@ When it answers, they're done. Tell them the handful of things worth knowing:
 A folder downloaded as a ZIP can't pull updates. Explain that, and offer to turn it into one that can, in place, keeping everything personal. Ask before you start.
 
 1. Make a safety copy of the whole folder next to it, for example `cp -R ~/dialzero-main ~/dialzero-main-backup` (use the real folder name).
-2. In the folder, run:
+2. Get the project's address: on its GitHub page (dialzero.dev links to it), the HTTPS address under the green **Code** button. Ask them to copy it if you don't have it. Then, in the folder, run (with the address in place of `<address>`):
    ```
    git init -b main
-   git remote add origin https://github.com/manavpthaker/dialzero.git
+   git remote add origin <address>
    git fetch origin
    git reset --hard origin/main
    git branch --set-upstream-to=origin/main

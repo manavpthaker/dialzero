@@ -7,6 +7,8 @@ body:
       value: |
         Sorry it got stuck. These details help find where.
 
+        Just a question, or not sure it's a bug? Ask under **Setup help** in the **Discussions** tab at the top of this page. Someone may have hit the same step. Found a security problem? Don't post it here; see `SECURITY.md`.
+
         **Before you paste anything, remove what's personal:** API keys, tokens, passwords, phone numbers, email addresses and people's names.
   - type: dropdown
     id: step
