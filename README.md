@@ -1,18 +1,108 @@
 # Dial Zero
 
-**Dial zero for the operator.** A personal assistant you text. It lives on your own Mac, remembers your life, and gets things done for you, powered by Claude or OpenAI (your choice): it keeps your calendar and to-dos straight, reminds you of what you'd forget, texts and emails people for you, and can even make phone calls.
+**Dial zero for the operator.** An open-source assistant that lives on your own Mac and handles the errands you keep putting off. It can make careful phone calls for you and check in with you on its own, and it asks before it spends money or speaks for you. You reach it by text from your phone, and it runs on Claude or OpenAI, your choice.
 
 It's not an app you open. It's a contact in your phone.
 
+Built by one person with Claude Code. Read [SECURITY.md](SECURITY.md) before you connect your accounts.
+
+<!-- TODO(before launch): make the demo play inline. Edit this README on github.com, drag docs/media/demo.mp4 into the editor, and replace the link on the next line with the github.com/user-attachments URL GitHub inserts (keep the caption). -->
 **[▶ Watch a 40-second demo](docs/media/demo.mp4)**: two real errands from the author's own texts. It calls a cafe about the wait, and when an online booking fails, it asks before calling the restaurant instead. Business names changed.
 
+- **It makes the call.** Text "call the dentist and move my cleaning to next week." It looks up their hours and calls while they're open, works the phone menu, lets them finish their hello, asks one thing at a time, and texts you back who it spoke with and any reference number. It calls businesses, not people, unless you confirm the person is OK with it.
+- **It comes back to you.** A chatbot waits for you; an assistant comes back to you. Turn on two short check-ins a day, a nudge when something's slipping, and a text when it's time to leave. Quiet the rest of the time.
+- **It asks before it acts.** Anything that costs money or speaks for you in a way you didn't ask for waits for your "go". That check is in the code, not just the prompt.
 - **You own the part that knows you.** Your memories, people and messages stay in one file on your Mac. Nothing is stored on anyone else's server except the AI model's normal processing of each request.
-- **A chatbot waits for you. An assistant comes back to you.** Two short check-ins a day, a nudge when something's slipping, quiet the rest of the time.
-- **It asks before it spends or commits.** Anything that costs money or speaks for you in a way you didn't ask for waits for your "go".
 
-> Website: [dialzero.dev](https://dialzero.dev). Status: beta. An early open-source release that works well for its author. Expect rough edges and read [What it can't do](#what-it-cant-do-yet).
+> Website: [dialzero.dev](https://dialzero.dev). Status: beta. An early open-source release that works well for its author. Expect rough edges and read [What it can't do](#what-it-cant-do-yet). What changed in each release: [CHANGELOG.md](CHANGELOG.md).
 
 ---
+
+## Start in three steps
+
+Each step works on its own. Stop after any of them.
+
+| Step | What you get | Time | What it costs |
+|---|---|---|---|
+| [1. Try it in 10 minutes](#1-try-it-in-10-minutes) | Talk to it in the terminal | About 10 minutes | AI usage only |
+| [2. Make it textable](#2-make-it-textable) | Text it from your phone; calendar, to-dos and email | About an hour | AI usage; guided setup uses your Claude Code or Codex plan |
+| [3. Add phone calls](#3-add-phone-calls) | It calls businesses for you and answers its own number | About 30 more minutes | A Twilio number and minutes, plus OpenAI's voice model |
+
+<!-- TODO(before launch): add one real cost line here from the author's own monthly API and Twilio bills, for example "The author's own setup, with calls, costs about $X a month." -->
+
+### 1. Try it in 10 minutes
+
+You need a Mac with [Node.js](https://nodejs.org) 20 or newer, and an API key from [Anthropic](https://console.anthropic.com/settings/keys) (Claude) or [OpenAI](https://platform.openai.com/api-keys). The key is pay-as-you-go and separate from any Claude or ChatGPT subscription. Set a monthly limit in your billing settings.
+
+**Get the code.** On this page, click the green **Code** button.
+
+- **Easiest:** choose **Open with GitHub Desktop** (install [GitHub Desktop](https://desktop.github.com) first), let it clone, then pick **Repository → Open in Terminal**.
+- **In Terminal:** copy the HTTPS address shown under **Code**, then run `git clone`, pasting the address in place of `<address>`. If your Mac offers to install "command line developer tools", say yes.
+
+```bash
+git clone <address> dialzero
+cd dialzero
+```
+
+**Add your key and start it.** In Terminal, in that folder:
+
+```bash
+npm install
+cp .env.example .env
+open -e .env
+```
+
+The last line opens the settings file in TextEdit. Paste your key after `ANTHROPIC_API_KEY=` and save. (Using OpenAI? Paste it after `OPENAI_API_KEY=` instead, and change `LLM_PROVIDER=claude` to `LLM_PROVIDER=openai`.) Then:
+
+```bash
+npm run chat
+```
+
+Talk to it like a person. Nothing is texted to anyone, and you can type `exit` to stop. It doesn't know you yet: run `npm run onboard` first if you want it to know your people and how you like things done.
+
+**Code → Download ZIP** also works, but a ZIP copy can't update itself, so use it only for a look.
+
+### 2. Make it textable
+
+Open the folder in [Claude Code](https://claude.com/claude-code) (in the Claude desktop app's Code tab) or OpenAI's [Codex](https://openai.com/codex) and type: **set me up**. Use whichever subscription you already have; it's only needed for setup.
+
+It goes one step at a time and checks that each one worked before moving on:
+
+- checks your Mac and keeps it from going to sleep;
+- signs Messages in to an Apple ID for the assistant (a second Apple ID is best, so your own texts stay separate);
+- interviews you so the assistant knows who you are;
+- walks you through the Mac permissions: Full Disk Access to read its messages and Automation to send replies. This is most of the hour;
+- connects Google for calendar, to-dos and email;
+- starts it in the background and has you send your first text.
+
+Stop any time and say "set me up" again later; it continues where you left off. Comfortable in a terminal? `npm run setup` runs the same checklist as a wizard. Every step is in [setup/GUIDE.md](setup/GUIDE.md).
+
+### 3. Add phone calls
+
+Calls are what Dial Zero is built around, and they take the most setup. Say **add phone calls** in Claude Code or Codex, or follow [docs/PHONE.md](docs/PHONE.md). You'll need:
+
+- an **OpenAI API key**, even if Claude runs everything else, because calls use OpenAI's voice model;
+- a **paid Twilio account and phone number** (a trial account can only call numbers you've verified, so it can't call a business);
+- **Tailscale** with Funnel turned on, which gives your Mac a public address for call events (free);
+- an **OpenAI project webhook** and its signing secret.
+
+A Twilio number has a small monthly fee, plus per-minute charges, plus OpenAI's voice model usage. Check their current prices.
+
+## Updating
+
+Fixes land most nights. To get them, say **update me** in Claude Code or Codex. It pulls the latest code, keeps your personal files, rebuilds, restarts the background service, re-runs the checker and tells you what changed.
+
+By hand, in the project folder:
+
+```bash
+git pull
+npm install
+npm run build
+npm run restart            # if it runs in the background
+npm run doctor -- --setup
+```
+
+Your personal files (`.env`, `config/profile.json`, your own `context/` files and the database) are never in git, so an update doesn't touch them. Downloaded the ZIP? Say "update me" anyway: it can turn the folder into one that updates, keeping your personal files.
 
 ## What it can do
 
@@ -65,20 +155,6 @@ If you've looked at OpenClaw or the other open-source assistants, here's what Di
 - Optional: a phone number from Twilio (a small monthly fee plus per-minute charges) if you want it to make and take calls.
 - Optional: a 1Password account, if you want it to sign in to websites for you. You give it one vault with only the logins you choose.
 
-## Setup: let Claude Code or Codex walk you through it
-
-You don't need to know how to code. You need a coding assistant: [Claude Code](https://claude.com/claude-code) (in the Claude desktop app's Code tab) or OpenAI's [Codex](https://openai.com/codex). Use whichever subscription you already have; it's only needed for setup.
-
-1. Download this project: click **Code → Download ZIP** above, unzip it, and move the folder somewhere you'll keep it (for example, your home folder).
-2. Open the folder in Claude Code or Codex.
-3. Type: **set me up**
-
-It goes one step at a time: check your Mac, pick Claude or OpenAI and get your key, interview you so the assistant knows you, walk you through each permission, connect Google, and send you your first text. It explains every step in plain words and checks that each one worked before moving on. You can stop and pick it back up any time: say "set me up" again and it continues where you left off.
-
-**Want to try it before connecting Messages?** After the interview, `npm run chat` lets you talk to your assistant right in the terminal. Nothing gets texted to anyone.
-
-**Comfortable in a terminal?** `npm install && npm run setup` runs the same checklist as a wizard. See [setup/GUIDE.md](setup/GUIDE.md) for every step.
-
 ## How it works (in one paragraph)
 
 Your Mac signs into Messages with an Apple ID. When you text that Apple ID, the assistant reads the message from the Mac's own Messages database, decides what to do using Claude or an OpenAI model, uses tools (calendar, email, a browser, the phone) to do it, and replies by text. What it learns about you is saved as small facts in a local database, so it gets more useful the more you use it. A few background jobs handle check-ins, reminders and watching your email. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -102,6 +178,8 @@ Read [docs/PRIVACY.md](docs/PRIVACY.md). Short version: everything it knows live
 - **Who it listens to.** Only the phone numbers and emails in your profile. A text from anyone else is ignored without a reply. Family members you add get only the Family chat, never your full assistant.
 - **What a malicious email or web page can do.** It reads email and websites, so assume some of that text will try to give it orders. Anything that spends money or speaks for you (a text, an email, a call, a booking) is staged first and runs only on your own "go" in a message you sent. That check is in the code, not just the prompt: a "go" inside an email, a web page or a background job is refused. Things you asked for directly ("tell Sam I'm late") count as your go, and only when your own recent message says so. That is the protection. It doesn't stop the assistant from misreading something; it stops it from acting on it without you.
 - **Claude or OpenAI.** Set `LLM_PROVIDER` to `claude` or `openai`. The code calls one adapter (`src/lib/openai.ts`) that sends every model call to the provider you picked. Phone calls always use OpenAI's voice model.
+
+The full picture, including what the approval gate doesn't stop and how to report a problem privately: [SECURITY.md](SECURITY.md).
 
 ## Build your own
 
