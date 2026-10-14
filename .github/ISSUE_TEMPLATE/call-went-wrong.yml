@@ -1,0 +1,52 @@
+name: A call went wrong
+description: A phone errand, wake-up call or call to its number didn't do what you asked.
+title: "Call: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Calls are the hardest part to get right, and real cases are how they get better.
+
+        **Keep other people out of it.** Don't name the business or the person who answered, and remove phone numbers, reference numbers, your name and your address. "A dentist's front desk" is plenty. Please don't attach call recordings.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of call?
+      options:
+        - An errand call to a business
+        - A business calling back about an errand
+        - A wake-up call or "call me"
+        - Someone calling its number (receptionist)
+        - Me calling its number
+    validations:
+      required: true
+  - type: textarea
+    id: asked
+    attributes:
+      label: What did you ask for?
+      description: Your text to it, with names and numbers removed.
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened on the call?
+      description: What it said or did, what the other side said, and where it went wrong. Its result text to you helps (names and numbers removed).
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should it have done?
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines (optional)
+      description: |
+        If it runs as the background service: `grep -E '\[(phone|errands|wakeup)\]' logs/agent.log | tail -40` in the project folder. Remove phone numbers, names and anything else personal before you paste.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Which version?
+      description: The release number, or the output of `git rev-parse --short HEAD`.

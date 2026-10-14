@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup help and questions
+    url: https://github.com/manavpthaker/dialzero/discussions/categories/setup-help
+    about: Not sure it's a bug? Ask in Setup help. Other people may have hit the same step.
+  - name: Show your setup
+    url: https://github.com/manavpthaker/dialzero/discussions/categories/running-it
+    about: Running it? Share which Mac, which features, your first errand and what broke.
+  - name: Report a security problem privately
+    url: https://github.com/manavpthaker/dialzero/security/advisories/new
+    about: Please don't open a public issue for security problems. See SECURITY.md.
