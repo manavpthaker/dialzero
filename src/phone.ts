@@ -347,14 +347,14 @@ export function conferenceMode(): boolean { return env('PHONE_CONFERENCE', 'true
  */
 export function assistantFirstMode(): boolean { return env('PHONE_ASSISTANT_FIRST', 'true') !== 'false'; }
 
-async function twilioPost(path: string, params: Record<string, string>): Promise<Record<string, unknown>> {
+async function twilioPost(path: string, params: Record<string, string> | URLSearchParams): Promise<Record<string, unknown>> {
   const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/${path}`, {
     method: 'POST',
     headers: {
       Authorization: `Basic ${Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64')}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body: new URLSearchParams(params),
+    body: params instanceof URLSearchParams ? params : new URLSearchParams(params),
   });
   const json = await res.json().catch(() => ({})) as Record<string, unknown>;
   if (!res.ok) throw new Error(`Twilio ${path} ${res.status}: ${String(json.message ?? '').slice(0, 160)}`);
@@ -380,10 +380,12 @@ export async function conferenceStep(step: string, token: string, params: URLSea
     c.bizStarted = true;
     c.sid = params.get('ConferenceSid') || undefined;
     const record: Record<string, string> = env('PHONE_RECORD_CALLS', 'false') === 'true' ? { Record: 'true' } : {};
-    twilioPost(`Conferences/${c.sid}/Participants.json`, {
-      From: TWILIO_NUMBER, To: c.dialTo, Beep: 'false', EndConferenceOnExit: 'true', Timeout: '30',
-      StatusCallback: rawStepUrl('biz', token), StatusCallbackEvent: 'answered completed', ...record,
-    }).then((r) => { c.bizSid = String(r.call_sid ?? '') || undefined; })
+    // StatusCallbackEvent is a list: one parameter per event. Sent as one "answered
+    // completed" string, Twilio ignored it and "they picked up" never fired.
+    const form = new URLSearchParams({ From: TWILIO_NUMBER, To: c.dialTo, Beep: 'false', EndConferenceOnExit: 'true', Timeout: '30', StatusCallback: rawStepUrl('biz', token), ...record });
+    form.append('StatusCallbackEvent', 'answered');
+    form.append('StatusCallbackEvent', 'completed');
+    twilioPost(`Conferences/${c.sid}/Participants.json`, form).then((r) => { c.bizSid = String(r.call_sid ?? '') || undefined; })
       .catch((err) => { console.error('[phone] assistant-first: could not dial the business:', err.message); c.onNoAnswer?.('failed'); });
     return empty;
   }
@@ -509,8 +511,19 @@ async function twilioCall(to: string, nonce: string, extra: Record<string, strin
  * Twilio's webhook for calls TO the bot's number. The owner gets through, and so
  * does a business calling back about a recent errand. Everyone else is turned away.
  */
+/** Plain forwarding numbers (PHONE_FORWARD_NUMBERS): calls ring the owner's cell, texts are forwarded to them. No assistant on these. */
+export function forwardNumbers(): string[] {
+  return (process.env.PHONE_FORWARD_NUMBERS || '').split(',').map((n) => normalizePhone(n)).filter((n) => n.length === 10);
+}
+
 function handleInboundCall(req: IncomingMessage, params: URLSearchParams): string {
   if (!twilioSignatureOk(req, params)) throw Object.assign(new Error('bad twilio signature'), { status: 403 });
+  // A forwarding number: ring the owner's cell, showing the real caller.
+  if (forwardNumbers().includes(normalizePhone(params.get('To') || '')) && ownerPhones()[0]) {
+    const caller = params.get('From') || '';
+    console.log(`[phone] forwarding a call to ${params.get('To')} from …${normalizePhone(caller).slice(-4)}`);
+    return `<?xml version="1.0" encoding="UTF-8"?><Response><Dial${/^\+\d{8,15}$/.test(caller) ? ` callerId="${xml(caller)}"` : ''} timeout="25"><Number>+1${ownerPhones()[0]}</Number></Dial></Response>`;
+  }
   const from = normalizePhone(params.get('From') || '');
   const verstat = params.get('StirVerstat') || '';
   if (!ownerPhones().includes(from)) {
@@ -721,7 +734,7 @@ export const PICKUP_SPEAK_MS = 3_000;
 
 /** The opener rule for outbound errand calls (exported for tests). */
 export function openerRule(bot: string, full: string): string {
-  return `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, calling for ${full}. I'd like to make a reservation for tomorrow, do you have a moment?" Introduce yourself ONCE per call: if they talk over you or say "hello?" again, never restart the intro; say "Hi, yes!" and ask your question in a few words. Never say "thanks for holding" unless they actually put you on hold. Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone.
+  return `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, ${full}'s assistant. I'd like to make a reservation for tomorrow, do you have a moment?" Always say you're their assistant ("Hi, this is ${bot}, ${full}'s assistant"); never "calling for ${full}", which sounds like you're looking for them there. Introduce yourself ONCE per call: if they talk over you or say "hello?" again, never restart the intro; say "Hi, yes!" and ask your question in a few words. Never say "thanks for holding" unless they actually put you on hold. Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone.
 ONE QUESTION PER TURN: ask one thing, then stop talking and wait for their full answer before the next. Never stack questions in one breath (a hotel desk got four questions at once and the call ended with none answered). Sound like a friendly person, not a checklist: react to what they say ("oh perfect, thank you", "got it"), let small talk happen, and work the next question in naturally. If an answer already covers a later question, don't ask it. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`;
 }
 
@@ -1160,7 +1173,9 @@ export function smsForwardText(params: URLSearchParams): { text: string; code: b
   const about = match ? ` (re: ${match.goal.slice(0, 60)})` : '';
   const pic = media ? ` [${media} photo${media > 1 ? 's' : ''}]` : '';
   const code = /\b(code|verification|verify|passcode|otp|one[- ]time)\b/i.test(body) && /\b\d{4,8}\b/.test(body);
-  return { text: `💬 Text to my number from ${who}${about}: ${body || ''}${pic}`.trim(), code };
+  const to = normalizePhone(params.get('To') || '');
+  const line = forwardNumbers().includes(to) ? `your (${to.slice(0, 3)}) number` : 'my number';
+  return { text: `💬 Text to ${line} from ${who}${about}: ${body || ''}${pic}`.trim(), code };
 }
 
 async function forwardInboundSms(params: URLSearchParams): Promise<void> {
@@ -1210,9 +1225,15 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
         // after, before semantic VAD ever closes the turn, so nothing got transcribed (2026-10-08).
         input: {
           ...(transcribeThem ? { transcription: { model: TRANSCRIBE_MODEL } } : {}),
+          // Business calls: the assistant finishes its (one short) sentence even if the line
+          // has noise. With barge-in on, a "hi", line noise or its own echo cut it off
+          // mid-word; they heard "Hi, this is…", silence, then a restart, and hung up.
+          // Calls with the owner keep barge-in. PHONE_BARGE_IN=true restores it.
           turn_detection: call.kind === 'errand' && call.reception
             ? { type: 'server_vad', silence_duration_ms: 600 }
-            : { type: 'semantic_vad' },
+            : call.kind === 'errand' && env('PHONE_BARGE_IN', 'false') !== 'true'
+              ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false }
+              : { type: 'semantic_vad' },
         },
         output: { voice: VOICE },
       },
@@ -1340,7 +1361,10 @@ export async function placeErrandCall(c: {
     for (const [k, v] of confs) if (v.expires < Date.now()) confs.delete(k);
     entry.conf = { token, name };
     const uri = `sip:${OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-Assistant-Nonce=${nonce}`;
-    const join = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true" waitUrl="" statusCallback="${xml(rawStepUrl('conf', token))}" statusCallbackEvent="join">${xml(name)}</Conference></Dial></Response>`;
+    // Diagnostic: with PHONE_RECORD_CALLS the conference itself is recorded (everyone mixed),
+    // so we hear exactly what the business heard.
+    const rec = env('PHONE_RECORD_CALLS', 'false') === 'true' ? ' record="record-from-start"' : '';
+    const join = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true" waitUrl=""${rec} statusCallback="${xml(rawStepUrl('conf', token))}" statusCallbackEvent="join">${xml(name)}</Conference></Dial></Response>`;
     const r = await twilioPost('Calls.json', { To: uri, From: TWILIO_NUMBER, Twiml: join, Timeout: '30' });
     const sid = String(r.sid ?? '');
     conf.assistantSid = sid;
