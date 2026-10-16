@@ -31,6 +31,12 @@ function fireAndForgetComplete(taskId: number, status: string) {
     .catch((err) => console.error('[sync] complete failed:', err));
 }
 
+/** Close a task here and on the owner's phone (Google Tasks). */
+export function markTaskDone(taskId: number, notes?: string): void {
+  updateTaskStatus(taskId, 'done', notes);
+  fireAndForgetComplete(taskId, 'done');
+}
+
 function formatTask(t: Task): string {
   const priority = t.priority === 'urgent' ? '🔴' : t.priority === 'high' ? '🟠' : t.priority === 'medium' ? '🟡' : '⚪';
   const due = t.due_date ? ` (due ${new Date(t.due_date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })})` : '';
@@ -161,8 +167,7 @@ export const taskTools: ToolDef[] = [
     },
     handler: async (input) => {
       const { task_id, notes } = input as { task_id: number; notes?: string };
-      updateTaskStatus(task_id, 'done', notes);
-      fireAndForgetComplete(task_id, 'done');
+      markTaskDone(task_id, notes);
       return `Task #${task_id} completed.`;
     },
   },

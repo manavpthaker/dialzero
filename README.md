@@ -130,6 +130,7 @@ Your personal files (`.env`, `config/profile.json`, your own `context/` files an
 | "Put the grocery list on Instacart" | Fills your Instacart cart in Chrome from the shared grocery list and stops before checkout. |
 | A voice memo | Transcribes it and files away what matters. |
 | "What did I tell Alex at lunch?" | If you use [Omi](https://omi.me) to record your conversations, it looks it up, and quietly keeps the promises, to-dos and people from each one (optional). |
+| "How did I do in that call?" | With Omi: how much you talked vs listened, questions, fillers, and 2-3 "you said X, try Y" moments; long work calls get a short debrief, and Sunday's check-in compares the week. |
 
 Plus a shared **family chat**: add it to a group text with your partner and it keeps a shared calendar (including repeating events and flyers from a photo) and grocery list, researches plans, and can ask you to OK a call, booking or website job they need done.
 

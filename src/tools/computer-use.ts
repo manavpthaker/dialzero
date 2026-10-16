@@ -28,6 +28,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { ToolDef, ToolContext } from './index.js';
 import { proposeAction, getAction, logComputerUseAction, type Action } from '../db.js';
 import { sendImageMessage } from '../channels/imessage.js';
+import { getOwner } from '../config.js';
 import { isBrowserConnected } from '../browser-bridge.js';
 
 const exec = promisify(execFile);
@@ -195,17 +196,33 @@ const TASK_WINDOW_MS = (() => {
 })();
 const taskApprovalUntil = new Map<string, number>();
 
+// The owner's go covers the task, not just the first window. A task that ran out of
+// time or steps used to need a fresh "Go?" each time (four for one form); within
+// RESUME_MS of their go, start_task re-opens the window instead. end_task
+// (the task is finished) closes it for good.
+const RESUME_MS = (() => {
+  const n = parseInt(process.env.COMPUTER_USE_TASK_RESUME_MS || '1800000', 10);
+  return Number.isFinite(n) && n >= 0 && n <= 7200000 ? n : 1800000; // default 30m
+})();
+const lastApproved = new Map<string, { actionId?: number; plan: string; at: number }>();
+
 // Called by the computer_use_task executor (inside confirm_action) on approval.
-export function approveComputerUseTask(group: string): void {
+export function approveComputerUseTask(group: string, actionId?: number, plan = ''): void {
   taskApprovalUntil.set(group, Date.now() + TASK_WINDOW_MS);
+  lastApproved.set(group, { actionId, plan, at: Date.now() });
 }
 // Re-gate immediately (used by trusted orchestrators like the content publisher
 // when they're done driving a vision flow, so the window doesn't linger).
 export function clearComputerUseTask(group: string): void {
   taskApprovalUntil.delete(group);
+  lastApproved.delete(group);
 }
 function taskApproved(group: string): boolean {
   return Date.now() < (taskApprovalUntil.get(group) || 0);
+}
+/** An approved desktop task is running in this group (the agent gives it more steps). */
+export function desktopTaskActive(group: string): boolean {
+  return taskApproved(group);
 }
 function taskSecondsLeft(group: string): number {
   return Math.max(0, Math.round(((taskApprovalUntil.get(group) || 0) - Date.now()) / 1000));
@@ -251,9 +268,11 @@ Actions:
 - key_press: Press a key (e.g. "return", "esc", "tab", "space", "page-down"). GATED.
 - scroll: Scroll the focused region up/down by a number of pages. GATED. (Keystroke-based — click into the scroll area first to focus it.)
 - start_task: Propose a MULTI-STEP desktop task for one-shot approval. Pass a plain-English "plan" of what you'll do. The user approves the whole task once with "go #action:N"; for the next few minutes your click/type/key_press/scroll run WITHOUT per-action approval, so you can screenshot→act→screenshot→act through the task. Free (it only stages the approval).
-- end_task: Close the task-approval window early once the task is done (gating returns to per-action). Free.
+- end_task: Close the task-approval window once the task is done (gating returns to per-action). Free.
 
-**Websites are NOT desktop work.** Anything on a website (cancel a subscription, export data, change a setting, fill a web form, read a page) goes through Chrome: do_online, book_online, or browser_action. Use computer_use only for things outside the web page: other Mac apps, LastPass or Chrome extension menus, system dialogs. start_task refuses a website plan while Chrome is connected.
+One go covers the whole task. If you run out of time or the owner says "keep going" / "finish it", call start_task again: within 30 minutes of their go it re-opens the window without asking them, so never re-ask for go on a task they already approved.
+
+**Websites are NOT desktop work.** Anything on a website (cancel a subscription, export data, change a setting, fill a web form, read a page) goes through Chrome: do_online, book_online, or browser_action. Use computer_use only for things outside the web page: other Mac apps, password manager or Chrome extension menus, system dialogs. start_task refuses a website plan while Chrome is connected.
 
 **Choosing the flow:** for a SINGLE action (one click/type), just call it directly — it's individually gated. For anything multi-step on the desktop (navigate an app UI, "open X and do Y"), call start_task FIRST with the plan, wait for the user's "go #action:N", then carry out the steps (screenshot between them — coordinates change as the UI changes), and call end_task when finished. Do NOT propose dozens of separate clicks.
 
@@ -349,7 +368,18 @@ You DO have this tool available — never tell the user you can't see or control
         // Website work goes through Chrome (do_online / browser_action), not the
         // desktop. Desktop control is only for things outside the web page.
         if (isBrowserConnected() && looksLikeWebTask(plan)) {
-          return 'Not started: this is a website task, so do it in Chrome, not by controlling the desktop. Use do_online (cancel, export, change a setting; pass owner_request if the owner asked) or browser_action for reading a page. Use computer_use only for things outside Chrome (other apps, LastPass or extension menus, system dialogs).';
+          return 'Not started: this is a website task, so do it in Chrome, not by controlling the desktop. Use do_online (cancel, export, change a setting; pass owner_request if the owner asked) or browser_action for reading a page. Use computer_use only for things outside Chrome (other apps, password manager or extension menus, system dialogs).';
+        }
+        if (taskApproved(group)) {
+          taskApprovalUntil.set(group, Date.now() + TASK_WINDOW_MS);
+          return `Already approved and running (~${taskSecondsLeft(group)}s left). Don't ask the owner again: carry on with the steps now, and call end_task when it's finished.`;
+        }
+        const prior = lastApproved.get(group);
+        const ownersOwnTurn = !context?.systemAuthored && !!context?.userId && context.userId === getOwner().id;
+        if (prior && ownersOwnTurn && Date.now() - prior.at < RESUME_MS) {
+          taskApprovalUntil.set(group, Date.now() + TASK_WINDOW_MS);
+          logComputerUseAction({ action, summary: `Resumed the approved desktop task${prior.actionId ? ` #${prior.actionId}` : ''}`, payload: { plan }, outcome: 'resumed', group });
+          return `The owner's earlier go${prior.actionId ? ` (#action:${prior.actionId})` : ''} still stands, so the window is open again (~${taskSecondsLeft(group)}s). Don't ask them again: pick up where you left off and finish it. Do only the task they approved: "${prior.plan.slice(0, 300)}". Anything different needs a fresh go. Call end_task when it's finished.`;
         }
         const id = proposeAction({
           kind: 'computer_use_task',
@@ -367,6 +397,7 @@ You DO have this tool available — never tell the user you can't see or control
       if (action === 'end_task') {
         const wasActive = taskApproved(group);
         taskApprovalUntil.delete(group);
+        lastApproved.delete(group);
         logComputerUseAction({ action, summary: 'Closed the desktop task-approval window', outcome: wasActive ? 'closed' : 'noop', group });
         return wasActive ? 'Task window closed — desktop actions are back to per-action approval.' : 'No active task window to close.';
       }

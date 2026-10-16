@@ -8,7 +8,9 @@ import type { ImageData, DocumentData } from './channels/imessage.js';
 import { loadSystemBlocks, getRetrievedBlocksSmart } from './context-resolver.js';
 import db, { getRecentMessages, getRecentMessagesWithMetadata, getMessagesSinceForGroups, listFamilyLists, saveMessage, appendToMessage, type MessageRow } from './db.js';
 import { toolRegistry, type ToolDef } from './tools/index.js';
-import { getProfileConfig } from './config.js';
+import { desktopTaskActive } from './tools/computer-use.js';
+import { closeTasksOwnerSaidAreDone } from './task-done-guard.js';
+import { getProfileConfig, getOwner } from './config.js';
 import { bindFamilyListAddRequest } from './family-list-intent.js';
 import {
   authorizeNaturalCalendarCreate,
@@ -44,6 +46,16 @@ import {
 // the full context, so this is a cost ceiling as much as a safety one. The tool-strip
 // at `turn === MAX_TURNS - 2` stays correct because it's relative to this constant.
 const MAX_TURNS = 12;
+// An approved desktop task takes two steps per click (look, then act), so 12 ran out
+// after about five clicks and the forced reply promised work nothing was doing.
+// While its window is open the message gets this many.
+const DESKTOP_TASK_MAX_TURNS = (() => {
+  const n = parseInt(process.env.DESKTOP_TASK_MAX_TURNS || '40', 10);
+  return Number.isFinite(n) && n >= MAX_TURNS && n <= 80 ? n : 40;
+})();
+// Said on the last step of a message the owner is waiting on. Nothing runs after the reply,
+// so "I'm searching now" was a promise with no one keeping it.
+const OUT_OF_STEPS_NOTE = 'You are out of steps for this message, and nothing keeps running after you reply. Say plainly what you finished and what is not done yet. Do not say you are still working on it or will do it now. If there is more to do, tell them to reply "keep going".';
 const MODEL = OPENAI_MODEL;
 const MAX_TOKENS_DEFAULT = 8000;
 const MAX_TOKENS_THINKING = 16000;
@@ -778,9 +790,13 @@ export async function runAgent(
   let response: string = '';
   let lastProgressTime = 0;
 
-  const maxTurns = Math.max(2, runtimeOverrides?.maxTurns ?? MAX_TURNS);
+  let maxTurns = Math.max(2, runtimeOverrides?.maxTurns ?? MAX_TURNS);
+  let desktopMode = false;
+  let toolsRan = 0;
+  const toolsCalled = new Set<string>();
   for (let turn = 0; turn < maxTurns; turn++) {
-    if (runtimeOverrides?.keepRecentToolOutputs) compactOldToolOutputs(input, runtimeOverrides.keepRecentToolOutputs);
+    const keepRecent = runtimeOverrides?.keepRecentToolOutputs ?? (desktopMode ? 8 : 0);
+    if (keepRecent) compactOldToolOutputs(input, keepRecent);
     let result: Awaited<ReturnType<typeof createOpenAIResponse>>;
     try {
       result = await createResponse({
@@ -815,6 +831,13 @@ export async function runAgent(
         console.warn(`[agent] context full on turn ${turn}; shrank earlier tool results and retrying`);
         turn--;
         continue;
+      }
+      // Mid desktop task the clicks already happened; a raw "Error: timed out" left
+      // the owner asking "Why". Their go still stands, so say how to continue.
+      if (desktopMode && toolsRan > 0 && !systemAuthored) {
+        console.warn(`[agent] desktop task stopped on turn ${turn}: ${err instanceof Error ? err.message : err}`);
+        response = `I lost my connection partway through the desktop task (after ${toolsRan} steps), so it isn't finished. Your go still stands: reply "keep going" and I'll pick up where I stopped.`;
+        break;
       }
       throw err;
     }
@@ -984,6 +1007,8 @@ export async function runAgent(
           });
         }
         logToolUse(block.name, groupConfig.key);
+        toolsCalled.add(block.name);
+        toolsRan++;
         const output = await tool.handler(toolInput, {
           groupKey: groupConfig.key,
           userId: user.id,
@@ -1063,10 +1088,16 @@ export async function runAgent(
       }
     }
 
+    if (!desktopMode && !runtimeOverrides?.maxTurns && desktopTaskActive(groupConfig.key)) {
+      desktopMode = true;
+      maxTurns = Math.max(maxTurns, DESKTOP_TASK_MAX_TURNS);
+    }
+
     // On the second-to-last turn, force a final text response (no more tools).
     if (turn === maxTurns - 2) {
       toolDefs.length = 0;
-      if (runtimeOverrides?.finalTurnNote) input.push({ role: 'developer', content: [{ type: 'input_text', text: runtimeOverrides.finalTurnNote }] });
+      const note = runtimeOverrides?.finalTurnNote ?? (systemAuthored ? undefined : OUT_OF_STEPS_NOTE);
+      if (note) input.push({ role: 'developer', content: [{ type: 'input_text', text: note }] });
     }
   }
 
@@ -1089,6 +1120,10 @@ export async function runAgent(
 
   if (response && !(groupConfig.key === 'family' && response.trim() === FAMILY_SILENT_RESPONSE)) {
     if (!systemAuthored) saveMessage(groupConfig.key, 'assistant', 'assistant', response);
+    if (groupConfig.key === 'admin' && !systemAuthored && user.id === getOwner().id) {
+      void closeTasksOwnerSaidAreDone(userMessage, response, toolsCalled)
+        .catch((err) => console.warn('[done-guard] failed:', err instanceof Error ? err.message : err));
+    }
     if (threadsOn) {
       // Everything this turn added (the owner's message, emails sent, the reply), off the reply path.
       // The message first (a Family row keeps its original iMessage time, so it may predate the turn).

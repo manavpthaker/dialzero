@@ -27,6 +27,7 @@ import { wakeUpTools } from './wakeup.js';
 import { receptionTools } from './reception.js';
 import { rideTools } from './rides.js';
 import { computerUseTools } from './computer-use.js';
+import { speechCoachTools } from '../speech-coach.js';
 import { notionTools } from './notion.js';
 import { familyCalendarTools } from './family-calendar.js';
 import { familyListTools } from './family-lists.js';
@@ -117,6 +118,7 @@ export const toolRegistry: Record<string, ToolDef[]> = {
   ],
   'booking-browser': [...bookingBrowserTools, checkDownloadsTool, enterOwnerCodeTool, openSignInLinkTool, desktopTool, fillLoginTool, fill2faTool, ...webTools.filter((t) => t.definition.name === 'web_search')],
   'computer-use': computerUseTools,
+  speaking: speechCoachTools,
   notion: notionTools,
   'family-calendar': familyCalendarTools,
   'family-lists': familyListTools,

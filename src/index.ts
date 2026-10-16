@@ -36,6 +36,7 @@ import { isOwnedOn, moduleFor, resolveModules } from './modules.js';
 import { startWatchdog } from './watchdog.js';
 import { startCanary } from './canary.js';
 import { startScorecard } from './scorecard.js';
+import { startSpeechCoach } from './speech-coach.js';
 import { getOwner } from './config.js';
 
 // Fixed receipt ack fired the instant a message lands, so the user knows it was
@@ -295,6 +296,7 @@ async function main() {
     ['family-scheduler', () => { startFamilyRuntimeScheduler(); }],
     ['email-reconciliation', startEmailReconciliationRuntime],
     ['omi-sync', startOmiSync],                    // also needs OMI_MCP_KEY; OMI_SYNC_ENABLED
+    ['speech-coach', startSpeechCoach],            // weekly speaking summary; SPEECH_COACH_ENABLED
     ['scorecard', startScorecard],                 // weekly scorecard into Sunday's morning check-in
   ];
 

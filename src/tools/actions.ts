@@ -56,7 +56,9 @@ const EXECUTORS: Record<string, Executor> = {
   browser_reorder: runBrowserReorder,
   computer_use: runComputerUseAction,
   computer_use_task: async (action: Action) => {
-    approveComputerUseTask(action.created_by_group);
+    let plan = action.summary;
+    try { plan = String((JSON.parse(action.payload_json) as { plan?: string }).plan || plan); } catch { /* summary is the plan */ }
+    approveComputerUseTask(action.created_by_group, action.id, plan);
     return { outcome: 'Desktop task approved — carry out the planned steps now (your click/type/scroll run without further approval for a few minutes; call end_task when done).', actual_cost_cents: 0 };
   },
   // Texting / emailing another person as the owner. Always $0, never reversible.
@@ -308,14 +310,18 @@ export const actionTools: ToolDef[] = [
         required: [],
       },
     },
-    handler: async (input) => {
+    handler: async (input, context) => {
       if (!isPhoneConfigured()) return 'Phone calling is not set up on this machine.';
       const reason = String((input as { reason?: string }).reason ?? '').trim() || 'The owner asked you to call them.';
+      // The owner's own "call me" rings any time; a scheduled run calling on its own keeps quiet hours.
+      const ownerAsked = !context?.systemAuthored && !!context?.userId && context.userId === getOwner().id;
       try {
-        const ok = await callOwner(reason);
+        const ok = await callOwner(reason, { ownerAsked });
         return ok
           ? 'Calling the owner now. Reply with one short line (e.g. "Calling you now").'
-          : 'Could not ring: it is quiet hours or the daily ring cap is used up.';
+          : ownerAsked
+            ? 'Could not ring: the daily "call me" limit is used up. Tell the owner, and offer to keep going by text.'
+            : 'Could not ring: it is quiet hours or the daily ring cap is used up.';
       } catch (err) {
         return `Call failed: ${err instanceof Error ? err.message : String(err)}`;
       }

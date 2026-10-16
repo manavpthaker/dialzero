@@ -26,7 +26,7 @@ import { toPlainText } from './lib/plaintext.js';
 import { normalizePhone } from './lib/phone.js';
 import { isQuietHours, todayET } from './lib/time-et.js';
 import { getBotName, getOwner, getTimezone, ownerRef } from './config.js';
-import { addInteraction, getPersonHandles, setMemory, saveMessage, type Action } from './db.js';
+import { addInteraction, getPersonHandles, getRecentMessagesWithMetadata, setMemory, saveMessage, type Action } from './db.js';
 import { resolvePerson } from './tools/outbound-send.js';
 import { sendInterrupt } from './cos-outbound.js';
 import {
@@ -45,6 +45,9 @@ const WEBHOOK_SECRET = env('OPENAI_WEBHOOK_SECRET');
 const MODEL = env('OPENAI_REALTIME_MODEL', 'gpt-realtime');
 const VOICE = env('PHONE_VOICE', 'marin');
 const TRANSCRIBE_MODEL = env('PHONE_TRANSCRIBE_MODEL', 'gpt-4o-mini-transcribe');
+// A small child on speakerphone came out as three different languages. Pinning the
+// language keeps the transcript in it. Empty = auto-detect.
+const TRANSCRIBE_LANGUAGE = env('PHONE_TRANSCRIBE_LANGUAGE', 'en');
 const REQUIRE_VERIFIED_CALLER = env('PHONE_REQUIRE_VERIFIED_CALLER', 'true') !== 'false';
 const MAX_CALL_MS = Number(env('PHONE_MAX_CALL_MIN', '15')) * 60_000;
 const TOOL_TIMEOUT_MS = Number(env('PHONE_TOOL_TIMEOUT_MS', '40000'));
@@ -58,7 +61,7 @@ const BLOCKED_PREFIXES = ['1911', '1988', '1900', '1976'];
 
 /** A wake-up call (src/wakeup.ts). `attempt` lets a late result be told apart from the current one. */
 export type WakeCallInfo = { id: number; attempt: number; timeLabel: string; note?: string; firstEvent?: string };
-type OwnerCall = { kind: 'owner'; reason?: string; wake?: WakeCallInfo };
+type OwnerCall = { kind: 'owner'; reason?: string; wake?: WakeCallInfo; twilioSid?: string };
 type ErrandCall = {
   kind: 'errand'; actionId: number; to: string; name: string | null;
   personId: number | null; goal: string; context: string;
@@ -205,6 +208,13 @@ type PendingCall = (OwnerCall | ErrandCall) & { expires: number; twilioSid?: str
 const pending = new Map<string, PendingCall>();
 let ringDay = '';
 let ringCount = 0;
+let askedCount = 0;
+// "Call me" is the owner asking, so quiet hours and the 3-a-day interrupt cap don't apply;
+// this only stops a runaway loop.
+const ASKED_DAILY_CAP = Number(env('PHONE_CALL_ME_DAILY_CAP', '12'));
+// After the owner picks up: the assistant speaks this soon, and gives up on a line this silent.
+const OWNER_SPEAK_MS = Number(env('PHONE_OWNER_SPEAK_MS', '1500'));
+const OWNER_DEAD_AIR_MS = Number(env('PHONE_OWNER_DEAD_AIR_MS', '45000'));
 
 export function isPhoneConfigured(): boolean {
   return !!(PUBLIC_URL && TWILIO_SID && TWILIO_TOKEN && TWILIO_NUMBER && OPENAI_PROJECT_ID && WEBHOOK_SECRET && process.env.OPENAI_API_KEY);
@@ -567,12 +577,18 @@ function handleInboundCall(req: IncomingMessage, params: URLSearchParams): strin
 
 // ── OpenAI webhook + call control ────────────────────────────────────────────
 
+/** Why the last webhook was refused, for the log (refusals had no stated cause). */
+let lastSigFailure = '';
 function openaiSignatureOk(req: IncomingMessage, body: string): boolean {
   const id = String(req.headers['webhook-id'] || '');
   const ts = String(req.headers['webhook-timestamp'] || '');
   const sigs = String(req.headers['webhook-signature'] || '');
+  lastSigFailure = 'missing webhook headers';
   if (!id || !ts || !sigs) return false;
-  if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
+  const age = Math.round(Date.now() / 1000 - Number(ts));
+  lastSigFailure = `stale timestamp (${age}s old)`;
+  if (Math.abs(age) > 300) return false;
+  lastSigFailure = `signed with a different secret (webhook-id ${id.slice(0, 12)}…)`;
   const key = Buffer.from(WEBHOOK_SECRET.replace(/^whsec_/, ''), 'base64');
   const expected = createHmac('sha256', key).update(`${id}.${ts}.${body}`).digest('base64');
   return sigs.split(' ').some((s) => {
@@ -638,6 +654,16 @@ function wakeSessionConfig(w: WakeCallInfo) {
   };
 }
 
+/** The owner's texts with the assistant from the last few hours, so a call picks up what was set up there. */
+export function recentTextsForCall(rows: { role: string; content: string; created_at: string }[], owner: string, bot: string, now = Date.now()): string {
+  const since = now - 3 * 3600_000;
+  return rows
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && Date.parse(`${m.created_at.replace(' ', 'T')}Z`) >= since)
+    .slice(-12)
+    .map((m) => `${m.role === 'user' ? owner : bot}: ${m.content.replace(/\s+/g, ' ').slice(0, 300)}`)
+    .join('\n');
+}
+
 function ownerSessionConfig(call: OwnerCall) {
   if (call.wake) return wakeSessionConfig(call.wake);
   const bot = getBotName();
@@ -645,15 +671,23 @@ function ownerSessionConfig(call: OwnerCall) {
   const opening = call.reason
     ? `You are calling ${owner} because: ${call.reason}. When they answer, say that in one or two sentences, then help with whatever they need.`
     : `${owner} called you. Greet them in a few words.`;
+  // A call used to start blank: the owner set something up by text ("you give the kid
+  // three clues"), called, and the assistant asked them for the clues.
+  let texts = '';
+  try { texts = recentTextsForCall(getRecentMessagesWithMetadata('admin', 40), owner, bot); } catch { /* call works without it */ }
   return {
     instructions: [
       `You are ${bot}, ${owner}'s personal assistant, on a phone call with ${owner}.`,
       opening,
+      TRANSCRIBE_LANGUAGE === 'en' ? 'Speak English.' : '',
       'Talk like a sharp human assistant: short, natural, spoken sentences. No lists, no markdown, no reading out links.',
-      `For anything about ${owner}'s calendar, email, tasks, people, money, memory, or to take any action (reminders, texts, emails, calls, orders), call ask_assistant with the request in their own words, then say the answer naturally. Say a short filler like "one sec" while it works. Never make up an answer instead of asking.`,
+      texts
+        ? `Your texts with ${owner} from the last few hours are below. If this call continues something set up there (a game, a plan, prep for a meeting), pick it up exactly as agreed, including who does what. If someone else is on the line with them, like their kid, talk to them the way the texts set up.\n${texts}`
+        : '',
+      `For anything about ${owner}'s calendar, email, tasks, people, money, memory, their files, or to take any action (reminders, texts, emails, calls, orders), call ask_assistant with the request in their own words, then say the answer naturally. Say a short filler like "one sec" while it works. Never make up an answer instead of asking, and never say you don't have access: ask_assistant can reach their files and data.`,
       'Anything that spends money or messages someone comes back as a proposal they approve by text; tell them it is waiting in their messages.',
       'When they are done, say bye and call hang_up.',
-    ].join('\n'),
+    ].filter(Boolean).join('\n'),
     tools: [askAssistantTool(), HANG_UP_TOOL],
   };
 }
@@ -921,6 +955,22 @@ function runCall(callId: string, call: PendingCall): void {
       if (!botSpoke && !ended) { console.warn(`[phone] ${callId}: nothing happened on the line, hanging up`); hangup(0); }
     }, onMenu ? 120_000 : 75_000);
   };
+  // The assistant calling the owner (not a wake-up): two "call me" calls were silent both
+  // ways (0 turns) and the owner only knew by texting "I'm not hearing anything". Now the
+  // assistant speaks first right after pickup, and a line where nothing is heard for
+  // OWNER_DEAD_AIR_MS is hung up with a text saying so.
+  const ownerOut = call.kind === 'owner' && !inbound && !call.wake;
+  let heardOwner = false;
+  let ownerDeadAir: ReturnType<typeof setTimeout> | undefined;
+  if (ownerOut) {
+    speakFirst = setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, OWNER_SPEAK_MS);
+    ownerDeadAir = setTimeout(() => {
+      if (heardOwner || ended) return;
+      console.warn(`[phone] ${callId}: owner call, nothing heard from them in ${OWNER_DEAD_AIR_MS / 1000}s, hanging up`);
+      tellOwnerCallFailed(callId, `📞 I called but the line was silent, so I hung up. Reply "call me" to try again.`);
+      hangup(0);
+    }, OWNER_DEAD_AIR_MS);
+  }
   if (waitForAnswer && firstConf) {
     // They pick up and say hello into a line the assistant is already on: let VAD take their
     // greeting, and speak first after a short pause if they don't say anything.
@@ -938,6 +988,16 @@ function runCall(callId: string, call: PendingCall): void {
 
   ws.on('open', () => {
     console.log(`[phone] control socket open for ${call.kind} call ${callId}`);
+    // Voicemail picked up a "call me": hang up and text the owner instead of talking to it.
+    if (ownerOut && call.twilioSid) {
+      answeredBy(call.twilioSid).then((who) => {
+        if (who && /^(machine|fax)/.test(who)) {
+          console.log(`[phone] owner call ${callId} reached ${who}, hanging up`);
+          tellOwnerCallFailed(callId, `📞 I called${call.kind === 'owner' && call.reason ? ` about: ${call.reason.slice(0, 120)}` : ''}, but it went to voicemail. Reply "call me" when you're free.`);
+          hangup(0);
+        }
+      }).catch(() => {});
+    }
     // A wake-up call answered by voicemail doesn't count as the owner talking back.
     if (wake && call.twilioSid) {
       answeredBy(call.twilioSid).then((who) => {
@@ -961,9 +1021,11 @@ function runCall(callId: string, call: PendingCall): void {
       console.warn(`[phone] reception ${ev.type}: ${JSON.stringify(ev.error ?? ev).slice(0, 300)}`);
     }
     if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
+      heardOwner = true;
       transcript.push(`${call.kind === 'owner' ? 'You' : 'Them'}: ${String(ev.transcript).trim()}`);
       if (wake && isRealWakeAnswer(String(ev.transcript))) wakeAnswers++;
     } else if (ev.type === 'response.created' || ev.type === 'input_audio_buffer.speech_started') {
+      if (ev.type === 'input_audio_buffer.speech_started') heardOwner = true;
       // A response is already coming (or they're talking): the speak-first timer must
       // not start a second one. That race made the assistant say its intro twice.
       botSpoke = true;
@@ -1057,6 +1119,7 @@ function runCall(callId: string, call: PendingCall): void {
     clearTimeout(cap);
     if (speakFirst) clearTimeout(speakFirst);
     if (deadAir) clearTimeout(deadAir);
+    if (ownerDeadAir) clearTimeout(ownerDeadAir);
     if (handedOff) {
       console.log(`[phone] ${callId} handed off to the next menu step`);
       return;
@@ -1190,7 +1253,11 @@ async function forwardInboundSms(params: URLSearchParams): Promise<void> {
 }
 
 async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<void> {
-  if (!openaiSignatureOk(req, body)) throw Object.assign(new Error('bad webhook signature'), { status: 401 });
+  if (!openaiSignatureOk(req, body)) {
+    let type = '?';
+    try { type = String((JSON.parse(body) as { type?: string }).type ?? '?'); } catch { /* not JSON */ }
+    throw Object.assign(new Error(`bad webhook signature: ${lastSigFailure}, event ${type.slice(0, 60)}`), { status: 401 });
+  }
   const ev = JSON.parse(body) as { type?: string; data?: { call_id?: string; sip_headers?: Array<{ name: string; value: string }> } };
   // One line per delivered event, so "is OpenAI reaching us?" is answerable from the log.
   console.log(`[phone] webhook received: ${ev.type ?? 'unknown'}`);
@@ -1213,31 +1280,39 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
   // Their side is transcribed too, so a dropped call can say why. The full transcript
   // is still only stored when the owner asks ("keep transcript"); otherwise just the last few lines go into the call log.
   const transcribeThem = call.kind === 'owner' || call.keepTranscript || (call.kind === 'errand' && env('PHONE_TRANSCRIBE_THEM', 'true') !== 'false');
-  try {
-    await callApi(callId, 'accept', {
-      type: 'realtime',
-      model: MODEL,
-      instructions: session.instructions,
-      tools: session.tools,
-      tool_choice: 'auto',
-      audio: {
-        // Reception uses plain silence detection: a robocall reading a code hangs up right
-        // after, before semantic VAD ever closes the turn, so nothing got transcribed (2026-10-08).
-        input: {
-          ...(transcribeThem ? { transcription: { model: TRANSCRIBE_MODEL } } : {}),
-          // Business calls: the assistant finishes its (one short) sentence even if the line
-          // has noise. With barge-in on, a "hi", line noise or its own echo cut it off
-          // mid-word; they heard "Hi, this is…", silence, then a restart, and hung up.
-          // Calls with the owner keep barge-in. PHONE_BARGE_IN=true restores it.
-          turn_detection: call.kind === 'errand' && call.reception
-            ? { type: 'server_vad', silence_duration_ms: 600 }
-            : call.kind === 'errand' && env('PHONE_BARGE_IN', 'false') !== 'true'
-              ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false }
-              : { type: 'semantic_vad' },
-        },
-        output: { voice: VOICE },
+  const acceptBody = (language: string) => ({
+    type: 'realtime',
+    model: MODEL,
+    instructions: session.instructions,
+    tools: session.tools,
+    tool_choice: 'auto',
+    audio: {
+      // Reception uses plain silence detection: a robocall reading a code hangs up right
+      // after, before semantic VAD ever closes the turn, so nothing got transcribed (2026-10-08).
+      input: {
+        ...(transcribeThem ? { transcription: { model: TRANSCRIBE_MODEL, ...(language ? { language } : {}) } } : {}),
+        // Business calls: the assistant finishes its (one short) sentence even if the line
+        // has noise. With barge-in on, a "hi", line noise or its own echo cut it off
+        // mid-word; they heard "Hi, this is…", silence, then a restart, and hung up.
+        // Calls with the owner keep barge-in. PHONE_BARGE_IN=true restores it.
+        turn_detection: call.kind === 'errand' && call.reception
+          ? { type: 'server_vad', silence_duration_ms: 600 }
+          : call.kind === 'errand' && env('PHONE_BARGE_IN', 'false') !== 'true'
+            ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false }
+            : { type: 'semantic_vad' },
       },
-    });
+      output: { voice: VOICE },
+    },
+  });
+  try {
+    try {
+      await callApi(callId, 'accept', acceptBody(transcribeThem ? TRANSCRIBE_LANGUAGE : ''));
+    } catch (err) {
+      // A rejected language setting must not cost the call: answer without it.
+      if (!transcribeThem || !TRANSCRIBE_LANGUAGE || !/realtime accept 4\d\d/.test(err instanceof Error ? err.message : '')) throw err;
+      console.warn(`[phone] accept with transcription language failed, retrying without: ${err instanceof Error ? err.message.slice(0, 200) : err}`);
+      await callApi(callId, 'accept', acceptBody(''));
+    }
   } catch (err) {
     // OpenAI lost the call ("No session found for the provided call_id", a wake-up
     // on 2026-10-08): the person picked up and hears silence. Hang up now instead of
@@ -1256,18 +1331,30 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
 /**
  * Ring the owner and open with `reason`. Used for time-critical interrupts
  * (cos-outbound) when PHONE_RING_ON_CRITICAL=true. Never rings in quiet hours,
- * and at most PHONE_RING_DAILY_CAP times a day.
+ * and at most PHONE_RING_DAILY_CAP times a day. The owner's own "call me"
+ * (`ownerAsked`) rings at any hour, up to PHONE_CALL_ME_DAILY_CAP a day.
  */
-export async function callOwner(reason: string): Promise<boolean> {
-  if (!isPhoneConfigured() || isQuietHours()) return false;
+export async function callOwner(reason: string, opts: { ownerAsked?: boolean } = {}): Promise<boolean> {
+  if (!isPhoneConfigured()) return false;
+  if (!opts.ownerAsked && isQuietHours()) return false;
   const today = todayET();
-  if (ringDay !== today) { ringDay = today; ringCount = 0; }
-  if (ringCount >= RING_DAILY_CAP) return false;
+  if (ringDay !== today) { ringDay = today; ringCount = 0; askedCount = 0; }
+  if (opts.ownerAsked ? askedCount >= ASKED_DAILY_CAP : ringCount >= RING_DAILY_CAP) return false;
   const to = ownerPhones()[0];
   if (!to) return false;
-  ringCount++;
-  await twilioCall(`+1${to}`, mintNonce({ kind: 'owner', reason: toPlainText(reason).slice(0, 600) }));
+  if (opts.ownerAsked) askedCount++; else ringCount++;
+  const nonce = mintNonce({ kind: 'owner', reason: toPlainText(reason).slice(0, 600) });
+  const entry = pending.get(nonce);
+  // Answering-machine detection, so the owner's voicemail isn't taken for them picking up.
+  const sid = await twilioCall(`+1${to}`, nonce, { MachineDetection: 'Enable' });
+  if (entry) entry.twilioSid = sid;
   return true;
+}
+
+/** Tell the owner a call they're waiting on didn't work, even at night (they asked for it). */
+function tellOwnerCallFailed(callId: string, text: string): void {
+  sendInterrupt({ source: 'phone', subject: `owner-call:${callId}`, kind: 'reply', text, bypass: 'owner-call' })
+    .catch((err) => console.warn('[phone] could not text the owner about the call:', err instanceof Error ? err.message : err));
 }
 
 /**

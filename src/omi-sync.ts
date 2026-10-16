@@ -15,7 +15,7 @@
 import { join } from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { saveFact, upsertPerson, addInteraction, createTask, getTaskById, getMemory, setMemory } from './db.js';
+import { saveFact, upsertPerson, addInteraction, createTask, getTaskById, getOpenTasks, getMemory, setMemory } from './db.js';
 import { pushTaskToGoogle } from './sync/tasks-sync.js';
 import { extractFirstJson, extractionComplete, makeLogger } from './lib/daemon.js';
 import { parseBoolEnv, parseNumEnv, parseStrEnv } from './lib/env.js';
@@ -23,15 +23,26 @@ import { OPENAI_MODEL } from './lib/openai.js';
 import { getProfileConfig } from './config.js';
 import { similarOpenTask } from './lib/task-dedupe.js';
 import dbh from './db.js';
+import { withLlmContext } from './lib/llm-context.js';
+import { compactTranscript, fingerprint, overlap, parseSegments, recordingQuality, wordCount, type Segment } from './lib/omi-transcript.js';
+import { recordConversation, type TalkInfo } from './speech-coach.js';
 
 const OMI_URL = 'https://api.omi.me/v1/mcp';
 const MEM_GROUP = 'omi';
 const SEEN_KEY = 'seen_conversations';
 const SEEN_MAX = 1000;
-const TRANSCRIPT_CHARS = 14_000;
+const TRANSCRIPT_CHARS = 24_000;
+// Omi keeps adding to a conversation, merges fragments and re-titles it for a while after
+// it first shows up; reading at first sight lost the end of calls and spent 70% of reads on
+// "Yeah." fragments that later vanished. Read only once it has been quiet this long.
+const SETTLE_MIN = () => parseNumEnv('OMI_SETTLE_MIN', 45);
+const MIN_WORDS = 25;
+// A short recording that is only "remind me to call the dentist tomorrow" is still read.
+const TODO_CUE = /\b(remind me|remember to|don'?t (let me )?forget|i (still )?(need|have|got) to|i gotta|i should|i'?ll|i will|i'?m going to|gonna|call|email|text|send|buy|order|pick up|drop off|return|book|schedule|pay|cancel|renew|follow up)\b/i;
+const PRINTS_KEY = 'fingerprints';
 const log = makeLogger(process.env.OMI_SYNC_LOG || join(process.cwd(), 'logs', 'omi-sync.log'), false);
 
-export interface OmiCard { id: string; title: string; when: string; discarded: boolean }
+export interface OmiCard { id: string; title: string; when: string; discarded: boolean; start?: string; end?: string }
 export interface OmiExtract {
   commitments?: Array<{ counterpart?: string; text: string }>;
   todos?: Array<{ title: string; due?: string | null }>;
@@ -41,6 +52,8 @@ export interface OmiExtract {
   others?: Array<{ person: string; text: string }>;
   /** Useful things the owner watched or listened to (tutorials, reviews, talks), kept to look up later. */
   watched?: Array<{ source?: string; topic: string; takeaways: string[] }>;
+  /** Was the owner really talking with people, where, and with whom (feeds the speaking coach). */
+  talk?: TalkInfo;
 }
 
 export interface OmiDeps {
@@ -51,7 +64,7 @@ export interface OmiDeps {
 }
 
 let client: Client | null = null;
-async function omiCall(tool: string, args: Record<string, unknown>): Promise<string> {
+export async function omiCall(tool: string, args: Record<string, unknown>): Promise<string> {
   if (!client) {
     const key = process.env.OMI_MCP_KEY?.trim();
     if (!key) throw new Error('OMI_MCP_KEY is not set');
@@ -99,6 +112,8 @@ export function parseCards(text: string): OmiCard[] {
       when: str(c.finished_at) || str(c.started_at) || str(c.created_at) || '',
       // TV/YouTube the desktop app overheard (Omi tags it "entertainment"): nothing of the owner's in it.
       discarded: c.discarded === true || str(s.category) === 'entertainment',
+      start: str(c.started_at) || str(c.created_at) || undefined,
+      end: str(c.finished_at) || undefined,
     }];
   });
 }
@@ -140,7 +155,39 @@ function fullName(name: string): string {
   return (row?.name ?? n).toLowerCase();
 }
 
-export function extractPrompt(card: OmiCard, transcript: string, today: string): string {
+/** Recent open tasks, so a call heard twice (or reworded) doesn't land on the owner's list twice. */
+function onOwnersList(): string[] {
+  try {
+    const cutoff = Date.now() - 21 * 86_400_000;
+    return getOpenTasks().filter((t) => Date.parse(`${t.created_at.replace(' ', 'T')}Z`) >= cutoff).slice(0, 40).map((t) => t.title);
+  } catch { return []; }
+}
+
+/**
+ * The contact a spoken name means. Omi only gives first names and upsertPerson matches on
+ * email/phone/LinkedIn, so every recording made a new "Casey" (six in one week).
+ * Full-name match, else the one person with that first name the owner has been in touch
+ * with in the last 60 days (or who lives with them), else an earlier record with the bare name, else new.
+ */
+export function personIdFor(name: string): number {
+  const n = name.trim();
+  const low = n.toLowerCase();
+  const q = dbh as unknown as { prepare: (s: string) => { get: (...a: unknown[]) => unknown; all: (...a: unknown[]) => unknown[] } };
+  if (low.includes(' ')) {
+    const exact = q.prepare(`SELECT p.id FROM people p LEFT JOIN interactions i ON i.person_id = p.id WHERE lower(p.name) = ? GROUP BY p.id ORDER BY max(i.occurred_at) DESC, p.id LIMIT 1`).get(low) as { id: number } | undefined;
+    return exact?.id ?? upsertPerson({ name: n });
+  }
+  let household: string[] = [];
+  try { household = (getProfileConfig().members ?? []).map((m) => String((m as { name?: string }).name ?? '').toLowerCase()); } catch { /* no profile */ }
+  const full = q.prepare(`SELECT lower(p.name) AS name, p.id, max(i.occurred_at) AS last FROM people p LEFT JOIN interactions i ON i.person_id = p.id
+    WHERE lower(p.name) LIKE ? GROUP BY p.id ORDER BY last DESC`).all(`${low} %`) as Array<{ name: string; id: number; last: string | null }>;
+  const recent = full.filter((r) => household.includes(low) || (r.last && Date.parse(`${r.last.replace(' ', 'T')}Z`) >= deps.now() - 60 * 86_400_000));
+  if (new Set(recent.map((r) => r.name)).size === 1) return recent[0].id;
+  const bare = q.prepare(`SELECT p.id FROM people p LEFT JOIN interactions i ON i.person_id = p.id WHERE lower(p.name) = ? GROUP BY p.id ORDER BY max(i.occurred_at) DESC, p.id LIMIT 1`).get(low) as { id: number } | undefined;
+  return bare?.id ?? upsertPerson({ name: n });
+}
+
+export function extractPrompt(card: OmiCard, transcript: string, today: string, onList: string[] = []): string {
   return `This is one conversation Omi recorded on the owner's phone/computer ("${card.title}"${card.when ? `, ${card.when}` : ''}). In the transcript the owner is the speaker marked as the user (is_user true / "You" / "user"); everyone else is someone they were talking to, or audio around them (TV, podcast, video, a call on speaker).${householdContext()}
 Reply with JSON only, no prose.
 
@@ -150,7 +197,8 @@ Reply with JSON only, no prose.
   "people": [{"name": "a real person they actually talked with or about", "note": "one short line on what they discussed"}],
   "decisions": [{"subject": "topic", "text": "what was decided"}],
   "others": [{"person": "full name of the household member (or other named speaker)", "text": "what they said about THEIR own work or life worth remembering: colleagues, projects, goals, worries, events"}],
-  "watched": [{"source": "what it was, e.g. 'YouTube interview on gel-supported 3D printing'", "topic": "2-5 word subject", "takeaways": ["specific point, number, name, product or how-to step worth remembering"]}]
+  "watched": [{"source": "what it was, e.g. 'YouTube interview on gel-supported 3D printing'", "topic": "2-5 word subject", "takeaways": ["specific point, number, name, product or how-to step worth remembering"]}],
+  "talk": {"real": true, "setting": "work | family | social | other", "with": ["first names of the people the owner talked with"]}
 }
 
 Rules:
@@ -159,8 +207,9 @@ Rules:
 - watched: the one exception for media. When the audio is something USEFUL the owner watched or listened to (a tutorial, how-to, product or film review, product demo, talk, interview, lecture, news analysis), add one item per piece with 2-6 concrete takeaways they could want to look up later. NEVER for TV shows, movies, dramas, sketches, comedy, music or ads: skip those entirely.
 - todos: ONLY when the owner explicitly commits to or asks for a reminder about a real errand or piece of work ("remind me to…", "I need to call…", "I'll send the deck Friday"). NEVER household moment-to-moment instructions or chores said in passing (shower, floss, laundry, "get it over there", "put that back"), things said to or about a child, or things someone else will do. Resolve relative dates against today (${today}); no date → null. If in doubt, leave it out: most conversations have zero todos.
 - people: real names only. Skip the owner, celebrities, and people only heard on media.
-- Omit any empty section. If nothing durable happened (small talk, a show or movie playing), reply {}.
-
+- talk: ALWAYS include it. real = the owner themselves was talking with people who were there or on a call (false for media, background audio, or a recording that is mostly someone else, like a partner's work call). setting = work (clients, colleagues, prospects, business), family (partner, kids, relatives), social (friends, neighbors), or other. with = first names; for family use the names in the household list above (Omi often mishears them).
+- Omit any other empty section. If nothing durable happened (small talk, a show or movie playing), reply with only "talk".
+${onList.length ? `- Already on the owner's task list (never add these again, even reworded):\n${onList.map((t) => `  - ${t}`).join('\n')}\n` : ''}
 TRANSCRIPT:
 ${transcript.slice(0, TRANSCRIPT_CHARS)}`;
 }
@@ -202,15 +251,25 @@ export function writeBack(parsed: OmiExtract, card: OmiCard): { facts: number; t
   }
   for (const p of parsed.people ?? []) {
     if (!p.name?.trim()) continue;
-    const personId = upsertPerson({ name: p.name.trim() });
+    const personId = personIdFor(p.name);
     addInteraction({ person_id: personId, channel: 'in-person', summary: (p.note || card.title).slice(0, 200), ref, occurred_at: at });
     out.people++;
   }
   return out;
 }
 
+interface Print { id: string; at: number; fp: string[] }
+function recentPrints(now: number): Print[] {
+  try { return (JSON.parse(getMemory(MEM_GROUP, PRINTS_KEY) ?? '[]') as Print[]).filter((p) => now - p.at < 3 * 86_400_000); } catch { return []; }
+}
+
 /** One pass. Returns how many conversations were read. */
 export async function omiSyncTick(): Promise<number> {
+  // Attributed so its cost shows as omi-sync, not "unknown".
+  return withLlmContext({ caller: 'omi-sync', lane: 'ambient' }, () => syncPass());
+}
+
+async function syncPass(): Promise<number> {
   const now = deps.now();
   const cards: OmiCard[] = [];
   let cursor: string | undefined;
@@ -225,19 +284,53 @@ export async function omiSyncTick(): Promise<number> {
   if (!fresh.length) return 0;
   const skip = fresh.filter((c) => c.discarded).map((c) => c.id);
   if (skip.length) markSeen(skip);
-  let read = 0;
-  for (const card of fresh.filter((c) => !c.discarded)) {
-    const transcript = await deps.call('get_conversation_by_id', { conversation_id: card.id, max_chars: TRANSCRIPT_CHARS });
-    const reply = await deps.extract(extractPrompt(card, transcript, ymd(now)));
-    const json = extractFirstJson(reply, '{', '}');
-    if (!json) { log(`${card.id}: no JSON from the extractor; will retry next pass`); continue; }
-    let parsed: OmiExtract;
-    try { parsed = JSON.parse(json) as OmiExtract; } catch { log(`${card.id}: unreadable JSON; will retry next pass`); continue; }
-    const counts = writeBack(parsed, card);
-    markSeen([card.id]);
-    read++;
-    log(`${card.id} "${card.title}": ${JSON.stringify(counts)}`);
+  const settleMs = SETTLE_MIN() * 60_000;
+  const settled = (c: OmiCard) => {
+    const t = Date.parse(c.end || c.start || '');
+    return !Number.isFinite(t) || now - t >= settleMs;
+  };
+  const ready = fresh.filter((c) => !c.discarded && settled(c));
+  if (!ready.length) return 0;
+
+  // Read them all first: tiny fragments are dropped, and the same audio recorded twice
+  // (phone + desktop) is read once, from the cleaner copy.
+  const got: Array<{ card: OmiCard; raw: string; segs: Segment[]; fp: string[]; q: number }> = [];
+  for (const card of ready) {
+    const raw = await deps.call('get_conversation_by_id', { conversation_id: card.id, max_chars: 40_000, max_segments: 500 });
+    const segs = parseSegments(raw);
+    const words = segs.reduce((n, x) => n + wordCount(x.text), 0);
+    if (segs.length && words < MIN_WORDS && !TODO_CUE.test(segs.map((x) => x.text).join(' '))) {
+      markSeen([card.id]);
+      log(`${card.id} "${card.title}": skipped, only ${words} words`);
+      continue;
+    }
+    got.push({ card, raw, segs, fp: fingerprint(segs), q: recordingQuality(segs) });
   }
+  got.sort((a, b) => b.q - a.q);
+  const prints = recentPrints(now);
+  const onList = onOwnersList();
+  let read = 0;
+  for (const g of got) {
+    const dup = prints.find((p) => overlap(g.fp, p.fp) >= 0.5);
+    if (dup) {
+      markSeen([g.card.id]);
+      log(`${g.card.id} "${g.card.title}": skipped, same recording as ${dup.id}`);
+      continue;
+    }
+    const transcript = g.segs.length ? compactTranscript(g.segs, TRANSCRIPT_CHARS) : g.raw.slice(0, TRANSCRIPT_CHARS);
+    const reply = await deps.extract(extractPrompt(g.card, transcript, ymd(now), onList));
+    const json = extractFirstJson(reply, '{', '}');
+    if (!json) { log(`${g.card.id}: no JSON from the extractor; will retry next pass`); continue; }
+    let parsed: OmiExtract;
+    try { parsed = JSON.parse(json) as OmiExtract; } catch { log(`${g.card.id}: unreadable JSON; will retry next pass`); continue; }
+    const counts = writeBack(parsed, g.card);
+    markSeen([g.card.id]);
+    if (g.fp.length) prints.push({ id: g.card.id, at: now, fp: g.fp });
+    read++;
+    log(`${g.card.id} "${g.card.title}": ${JSON.stringify(counts)}${parsed.talk?.real ? ` talk:${parsed.talk.setting ?? '?'}` : ''}`);
+    try { await recordConversation(g.card, g.segs, parsed.talk); } catch (err) { log(`${g.card.id}: speaking review failed: ${err instanceof Error ? err.message : err}`); }
+  }
+  setMemory(MEM_GROUP, PRINTS_KEY, JSON.stringify(prints.slice(-150)));
   setMemory(MEM_GROUP, 'omi-sync_last_tick', new Date(now).toISOString());
   return read;
 }
