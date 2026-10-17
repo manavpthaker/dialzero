@@ -680,6 +680,7 @@ function ownerSessionConfig(call: OwnerCall) {
       `You are ${bot}, ${owner}'s personal assistant, on a phone call with ${owner}.`,
       opening,
       TRANSCRIBE_LANGUAGE === 'en' ? 'Speak English.' : '',
+      'Keep each turn to one or two sentences, then stop. If a kid, a TV or other voices are in the room, ignore them unless they are talking to you. Never jump ahead: if you were cut off, finish the thought you were on.',
       'Talk like a sharp human assistant: short, natural, spoken sentences. No lists, no markdown, no reading out links.',
       texts
         ? `Your texts with ${owner} from the last few hours are below. If this call continues something set up there (a game, a plan, prep for a meeting), pick it up exactly as agreed, including who does what. If someone else is on the line with them, like their kid, talk to them the way the texts set up.\n${texts}`
@@ -961,6 +962,10 @@ function runCall(callId: string, call: PendingCall): void {
   // OWNER_DEAD_AIR_MS is hung up with a text saying so.
   const ownerOut = call.kind === 'owner' && !inbound && !call.wake;
   let heardOwner = false;
+  let talking = false;
+  let overTalk = 0;
+  let noiseOverTalk = 0;
+  let pendingOverTalk = false;
   let ownerDeadAir: ReturnType<typeof setTimeout> | undefined;
   if (ownerOut) {
     speakFirst = setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, OWNER_SPEAK_MS);
@@ -1020,12 +1025,21 @@ function runCall(callId: string, call: PendingCall): void {
     if (call.kind === 'errand' && call.reception && (ev.type === 'error' || /failed/.test(ev.type))) {
       console.warn(`[phone] reception ${ev.type}: ${JSON.stringify(ev.error ?? ev).slice(0, 300)}`);
     }
+    if (ev.type === 'response.done') talking = false;
+    if (ev.type === 'conversation.item.input_audio_transcription.completed') {
+      // Sound over the assistant that came to no words was noise, not the other side.
+      if (pendingOverTalk && !String(ev.transcript ?? '').trim()) noiseOverTalk++;
+      pendingOverTalk = false;
+    }
     if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
       heardOwner = true;
       transcript.push(`${call.kind === 'owner' ? 'You' : 'Them'}: ${String(ev.transcript).trim()}`);
       if (wake && isRealWakeAnswer(String(ev.transcript))) wakeAnswers++;
     } else if (ev.type === 'response.created' || ev.type === 'input_audio_buffer.speech_started') {
-      if (ev.type === 'input_audio_buffer.speech_started') heardOwner = true;
+      if (ev.type === 'input_audio_buffer.speech_started') {
+        heardOwner = true;
+        if (talking) { overTalk++; pendingOverTalk = true; }
+      } else talking = true;
       // A response is already coming (or they're talking): the speak-first timer must
       // not start a second one. That race made the assistant say its intro twice.
       botSpoke = true;
@@ -1120,6 +1134,7 @@ function runCall(callId: string, call: PendingCall): void {
     if (speakFirst) clearTimeout(speakFirst);
     if (deadAir) clearTimeout(deadAir);
     if (ownerDeadAir) clearTimeout(ownerDeadAir);
+    if (overTalk) console.log(`[phone] ${callId}: sound over the assistant ${overTalk}x, ${noiseOverTalk} of them no words (noise)`);
     if (handedOff) {
       console.log(`[phone] ${callId} handed off to the next menu step`);
       return;
@@ -1280,7 +1295,13 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
   // Their side is transcribed too, so a dropped call can say why. The full transcript
   // is still only stored when the owner asks ("keep transcript"); otherwise just the last few lines go into the call log.
   const transcribeThem = call.kind === 'owner' || call.keepTranscript || (call.kind === 'errand' && env('PHONE_TRANSCRIBE_THEM', 'true') !== 'false');
-  const acceptBody = (language: string) => ({
+  // Owner calls cut the assistant off mid-sentence and it restarted on the next one
+  // (speakerphone with a kid in the room): any noise, a kid, or its own echo counted as the
+  // owner talking. Like business calls, the assistant now finishes its (short) turn; noise
+  // reduction for speakerphone. PHONE_OWNER_BARGE_IN=true puts interruptions back.
+  const ownerBargeIn = env('PHONE_OWNER_BARGE_IN', 'false') === 'true';
+  const noise = call.kind === 'owner' ? env('PHONE_OWNER_NOISE_REDUCTION', 'far_field') : '';
+  const acceptBody = (language: string, extras = true) => ({
     type: 'realtime',
     model: MODEL,
     instructions: session.instructions,
@@ -1291,15 +1312,19 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
       // after, before semantic VAD ever closes the turn, so nothing got transcribed (2026-10-08).
       input: {
         ...(transcribeThem ? { transcription: { model: TRANSCRIBE_MODEL, ...(language ? { language } : {}) } } : {}),
+        ...(extras && noise ? { noise_reduction: { type: noise } } : {}),
         // Business calls: the assistant finishes its (one short) sentence even if the line
         // has noise. With barge-in on, a "hi", line noise or its own echo cut it off
         // mid-word; they heard "Hi, this is…", silence, then a restart, and hung up.
-        // Calls with the owner keep barge-in. PHONE_BARGE_IN=true restores it.
+        // Owner calls also finish the turn unless PHONE_OWNER_BARGE_IN=true. PHONE_BARGE_IN=true
+        // restores it for business calls.
         turn_detection: call.kind === 'errand' && call.reception
           ? { type: 'server_vad', silence_duration_ms: 600 }
           : call.kind === 'errand' && env('PHONE_BARGE_IN', 'false') !== 'true'
             ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false }
-            : { type: 'semantic_vad' },
+            : call.kind === 'owner' && !ownerBargeIn
+              ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false }
+              : { type: 'semantic_vad' },
       },
       output: { voice: VOICE },
     },
@@ -1308,10 +1333,10 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
     try {
       await callApi(callId, 'accept', acceptBody(transcribeThem ? TRANSCRIBE_LANGUAGE : ''));
     } catch (err) {
-      // A rejected language setting must not cost the call: answer without it.
-      if (!transcribeThem || !TRANSCRIBE_LANGUAGE || !/realtime accept 4\d\d/.test(err instanceof Error ? err.message : '')) throw err;
-      console.warn(`[phone] accept with transcription language failed, retrying without: ${err instanceof Error ? err.message.slice(0, 200) : err}`);
-      await callApi(callId, 'accept', acceptBody(''));
+      // A rejected language or noise setting must not cost the call: answer without them.
+      if (!((transcribeThem && TRANSCRIBE_LANGUAGE) || noise) || !/realtime accept 4\d\d/.test(err instanceof Error ? err.message : '')) throw err;
+      console.warn(`[phone] accept with language/noise settings failed, retrying without: ${err instanceof Error ? err.message.slice(0, 200) : err}`);
+      await callApi(callId, 'accept', acceptBody('', false));
     }
   } catch (err) {
     // OpenAI lost the call ("No session found for the provided call_id", a wake-up
