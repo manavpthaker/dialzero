@@ -109,7 +109,7 @@ Your personal files (`.env`, `config/profile.json`, your own `context/` files an
 | You text | It does |
 |---|---|
 | "What's my day look like?" | Reads your calendar and to-dos and answers in two lines. |
-| "Remind me to call the plumber Thursday" | Adds a to-do (synced to your phone's Google Tasks) and brings it up at the right time. |
+| "Remind me to call the plumber Thursday" | Adds a to-do (synced to your phone's Google Tasks) and brings it up at the right time. Say "plumber done" later and it closes it. |
 | "Tell Sam I'm running 10 late" | Texts Sam for you, as you. |
 | "Email the landlord about the leak" | Writes and sends the email from your Gmail. |
 | "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. It notes who it spoke with and any reference number, and uses that on the next call. If the menu only leads to voicemail, it leaves the message. If it can't get through, it tells you exactly where it got stuck. While it works it sends a short update now and then (never a barrage) and tells you the real time of the next call. |
@@ -118,6 +118,9 @@ Your personal files (`.env`, `config/profile.json`, your own `context/` files an
 | (a website job hits a login it can't do) | Texts you a one-time link that opens this Mac's screen in your phone's browser; do the step, tap Done, and the job carries on (optional). Changed your mind mid-job ("make it 7:30")? Just say so. |
 | "Download all my recordings from that app, then cancel it" | Works through the site one step at a time, checks the files landed in Downloads, and only cancels once the export is done. |
 | (nothing, you're busy) | Texts you when it's time to leave for something on your calendar, or when two things overlap. |
+| "Call me" | Rings you right away, any hour you ask. It speaks first, picks up what you set up by text, and waits for you to finish instead of talking over you. Voicemail or a silent line gets a text instead. Its own calls to you keep your quiet hours. |
+| (a second phone number) | Optional: extra numbers that just forward calls (with the real caller ID) and texts to your cell. |
+| "Fill out this form in the Pages app" | Works the whole Mac, not just Chrome, for things outside the browser. One "go" covers the whole task, and if it runs out of steps it tells you what's done and what isn't. |
 | "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
 | "Hey Siri, ask Milo what's next" (whatever you named it) | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
 | "What did Sam and I talk about on Aug 12?" | Searches your texts by person (every number and email it has for them) and by date. |
@@ -177,7 +180,7 @@ Read [docs/PRIVACY.md](docs/PRIVACY.md). Short version: everything it knows live
 ## Security
 
 - **Who it listens to.** Only the phone numbers and emails in your profile. A text from anyone else is ignored without a reply. Family members you add get only the Family chat, never your full assistant.
-- **What a malicious email or web page can do.** It reads email and websites, so assume some of that text will try to give it orders. Anything that spends money or speaks for you (a text, an email, a call, a booking) is staged first and runs only on your own "go" in a message you sent. That check is in the code, not just the prompt: a "go" inside an email, a web page or a background job is refused. Things you asked for directly ("tell Sam I'm late") count as your go, and only when your own recent message says so. That is the protection. It doesn't stop the assistant from misreading something; it stops it from acting on it without you.
+- **What a malicious email or web page can do.** It reads email and websites, so assume some of that text will try to give it orders. Anything that spends money or speaks for you (a text, an email, a call, a booking) is staged first and runs only on your own "go" in a message you sent. That check is in the code, not just the prompt: a "go" inside an email, a web page or a background job is refused. Things you asked for directly ("tell Sam I'm late") count as your go, and only when your own recent message says so. A bare "ok" never approves something proposed while it was answering that same message; it shows you first. Coding help (Codex) starts only when you ask for code work, and never sees your keys. That is the protection. It doesn't stop the assistant from misreading something; it stops it from acting on it without you.
 - **Claude or OpenAI.** Set `LLM_PROVIDER` to `claude` or `openai`. The code calls one adapter (`src/lib/openai.ts`) that sends every model call to the provider you picked. Phone calls always use OpenAI's voice model.
 
 The full picture, including what the approval gate doesn't stop and how to report a problem privately: [SECURITY.md](SECURITY.md).

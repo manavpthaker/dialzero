@@ -21,7 +21,7 @@ Dial Zero reads your texts and email, works in your signed-in Chrome, and can te
 ## What it doesn't stop
 
 - **Misreading.** The gate stops it acting without you. It doesn't stop it misunderstanding you, or summarizing an email wrong. Read the plan before you say go.
-- **A loose "go".** The check looks for an approval word ("go", "yes", "ok", "sure", a thumbs-up and similar) or the action's number in your latest message. A "yes" you meant for something else can count, and if two actions are waiting, a bare "go" doesn't say which. When it matters, reply with the action's number.
+- **A loose "go".** The check looks for an approval word ("go", "yes", "ok", "sure", a thumbs-up and similar) or the action's number in your latest message. A "yes" you meant for something else can count (though never for an action proposed while it was answering that same message: that one is shown to you first), and if two actions are waiting, a bare "go" doesn't say which. When it matters, reply with the action's number.
 - **Details inside "you asked for it".** For a text, email, call or booking you asked for, the code checks that your own recent words ask for that kind of action. It does not check that the person, number or details match what you said. Text planted in an email or web page could, in principle, steer those details.
 - **Reading.** It reads your messages, email, calendar and the pages it visits without asking, and that text goes to your AI provider (Anthropic or OpenAI). Instructions hidden in that text can still change what it tells you or what it proposes.
 - **Call behavior is mostly instructions.** Saying it's an AI when asked, never making up a detail, and never giving card or ID details are instructions to OpenAI's voice model, not hard checks. The hours, the daily cap and the saved-contact check are in code. It can't tell that an unsaved number is a person's cell.
@@ -29,7 +29,7 @@ Dial Zero reads your texts and email, works in your signed-in Chrome, and can te
 - **Anyone with your Mac.** Its memory, your keys (`.env`) and its database are plain files on your Mac. Keep FileVault on and the Mac locked.
 - **The services it uses.** Your AI provider, Google and Twilio see what they process. See [docs/PRIVACY.md](docs/PRIVACY.md).
 
-What is reachable from outside your Mac: with phone calls on, Tailscale Funnel makes two paths public for call events, and each request is checked against Twilio's or OpenAI's signature ([docs/PHONE.md](docs/PHONE.md)). The dashboard listens only on your Mac. The take-over screen page and the Siri endpoint are reachable only inside your own Tailscale network.
+What is reachable from outside your Mac: with phone calls on, Tailscale Funnel makes two paths public for call events, and each request is checked against Twilio's or OpenAI's signature ([docs/PHONE.md](docs/PHONE.md)). The dashboard listens only on your Mac and refuses requests addressed to any other host name. The Chrome bridge accepts only a Chrome extension (set `BROWSER_BRIDGE_TOKEN` to require yours). Pages it fetches are checked against private and local addresses on every redirect. The take-over screen page and the Siri endpoint are reachable only inside your own Tailscale network.
 
 ## Report a problem privately
 
