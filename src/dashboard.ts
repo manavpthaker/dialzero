@@ -491,8 +491,15 @@ function renderPage(query?: string): string {
   return shell(renderDashboard(), { autorefresh: true });
 }
 
+// Loopback binding alone doesn't stop a web page: DNS rebinding can point
+// evil.example at 127.0.0.1. So the Host must be ours.
+function localHost(host: string | undefined): boolean {
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host ?? '');
+}
+
 function handle(req: IncomingMessage, res: ServerResponse): void {
   const url = req.url || '/';
+  if (!localHost(req.headers.host)) { res.writeHead(403); res.end('forbidden host'); return; }
   if (url === '/' || url.startsWith('/?')) {
     const q = new URL(url, 'http://localhost').searchParams.get('q') ?? undefined;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -514,7 +521,7 @@ export function startDashboard(): void {
   server.on('error', (err) => {
     console.error('[Dashboard] server error:', err);
   });
-  // Bind to loopback only. No auth — this is a local UI for the Mac mini.
+  // Bind to loopback only. No login — a local UI for the Mac mini; handle() checks Host.
   server.listen(port, '127.0.0.1', () => {
     console.log(`[Dashboard] listening on http://127.0.0.1:${port}`);
   });

@@ -41,7 +41,7 @@ function basename(p: string): string {
   return idx === -1 ? norm : norm.slice(idx + 1);
 }
 
-function looksLikeSecret(p: string): boolean {
+export function looksLikeSecret(p: string): boolean {
   const b = basename(p);
   if (SECRET_BASENAMES.has(b)) return true;
   for (const s of SECRET_SUFFIXES) if (b.endsWith(s)) return true;
@@ -91,6 +91,19 @@ export function resolveSafePath(inputPath: string, opts: ResolveOpts = {}): stri
   if (!opts.allowSecrets && looksLikeSecret(abs)) {
     throw new Error(`path-utils: ${abs} matches a secret-file pattern`);
   }
+  return abs;
+}
+
+/**
+ * A path inside `dir` (relative paths resolve against it). Throws when the
+ * result would leave `dir` ("../scripts/install-launchd.ts") or names a secret.
+ */
+export function resolveInside(dir: string, inputPath: string): string {
+  if (!inputPath || typeof inputPath !== 'string') throw new Error('path-utils: empty or non-string path');
+  const root = resolve(dir);
+  const abs = resolve(root, inputPath);
+  if (abs !== root && !abs.startsWith(root + '/')) throw new Error(`path-utils: ${inputPath} is outside ${root}`);
+  if (looksLikeSecret(abs)) throw new Error(`path-utils: ${inputPath} matches a secret-file pattern`);
   return abs;
 }
 

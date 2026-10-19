@@ -38,15 +38,17 @@ export function startBrowserBridge(): void {
   console.log(`[browser-bridge] WebSocket server listening on ws://${HOST}:${PORT}${BRIDGE_TOKEN ? ' (auth required)' : ' (no token — set BROWSER_BRIDGE_TOKEN to require auth)'}`);
 
   wss.on('connection', (socket, req) => {
-    // Origin allowlist when a specific extension id is configured.
-    if (ALLOWED_EXTENSION_ID) {
-      const origin = req.headers.origin || '';
-      const expected = `chrome-extension://${ALLOWED_EXTENSION_ID}`;
-      if (origin && origin !== expected) {
-        console.warn(`[browser-bridge] rejecting connection from unexpected origin: ${origin}`);
-        socket.close(4403, 'forbidden origin');
-        return;
-      }
+    // Only a Chrome extension may connect: web pages send their own http(s)
+    // Origin and a bare local client sends none. With BROWSER_EXTENSION_ID set,
+    // only that extension. (A local process can fake Origin; the token covers that.)
+    const origin = req.headers.origin || '';
+    const allowed = ALLOWED_EXTENSION_ID
+      ? origin === `chrome-extension://${ALLOWED_EXTENSION_ID}`
+      : /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+    if (!allowed) {
+      console.warn(`[browser-bridge] rejecting connection from origin: ${origin || '(none)'}`);
+      socket.close(4403, 'forbidden origin');
+      return;
     }
 
     // Authentication handshake (only when a token is configured).

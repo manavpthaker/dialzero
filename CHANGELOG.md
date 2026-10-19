@@ -8,6 +8,7 @@ Dial Zero's code is ported most nights from the author's own assistant, so `main
 
 - **Setup in three steps** at the top of the README: try it in the terminal in about 10 minutes, make it textable, then add phone calls. Get the code with GitHub Desktop or `git clone` instead of a ZIP.
 - **Updating.** Say "update me" in Claude Code or Codex. It pulls the latest code, keeps your personal files, rebuilds, restarts the background service, re-runs the checker and tells you what changed. A folder downloaded as a ZIP can be turned into one that updates, in place.
+- **Security pass.** A bare "ok" no longer approves an action proposed in the same turn (say, after reading an email that asked for it); Codex starts only when you ask for code work, sees none of the assistant's keys, and opens the assistant's own folder read-only; context files can't leave context/; fetch_url checks where a name really points and every redirect; the browser bridge accepts only a Chrome extension; the dashboard refuses other host names; iMessage recipients are escaped.
 - **SECURITY.md.** What the approval gate stops, what it doesn't, and how to report a problem privately.
 - **Issue forms** for "Setup got stuck" and "A call went wrong".
 - **"Call me" works any hour** when you ask for it (the assistant's own calls still respect quiet hours). It speaks first when you pick up, hangs up and texts you if it reaches voicemail or a silent line, and picks up what you set up by text in the last few hours.

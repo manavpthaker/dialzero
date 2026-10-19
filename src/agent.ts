@@ -1013,6 +1013,7 @@ export async function runAgent(
           groupKey: groupConfig.key,
           userId: user.id,
           turnId,
+          turnStartedAt: `${turnStartedAt.replace(' ', 'T')}Z`,
           currentMessage: userMessage,
           systemAuthored: systemAuthored || undefined,
           recentMessages: [...familyHistory, ...sameRunFamilyCalendarReads],

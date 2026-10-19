@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSy
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import type { ToolDef } from './index.js';
-import { validateRepoName } from './path-utils.js';
+import { validateRepoName, resolveSafePath, resolveInside } from './path-utils.js';
 
 const exec = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,7 +25,14 @@ export const githubTools: ToolDef[] = [
     },
     handler: async (input) => {
       const path = input.path as string;
-      const fullPath = path.startsWith('/') ? path : join(CONTEXT_DIR, path);
+      // Relative paths stay inside context/; absolute ones must be in an
+      // allowlisted repo and not a secret (.env, keys). See path-utils.ts.
+      let fullPath: string;
+      try {
+        fullPath = path.startsWith('/') ? resolveSafePath(path) : resolveInside(CONTEXT_DIR, path);
+      } catch (err) {
+        return `Not allowed: ${(err as Error).message}`;
+      }
       if (!existsSync(fullPath)) return `File not found: ${path}`;
       return readFileSync(fullPath, 'utf-8');
     },
@@ -48,7 +55,12 @@ export const githubTools: ToolDef[] = [
       const path = input.path as string;
       const content = input.content as string;
       const append = input.append as boolean || false;
-      const fullPath = join(CONTEXT_DIR, path);
+      let fullPath: string;
+      try {
+        fullPath = resolveInside(CONTEXT_DIR, path);
+      } catch (err) {
+        return `Not allowed: ${(err as Error).message}`;
+      }
       const dir = dirname(fullPath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       if (append) {

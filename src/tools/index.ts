@@ -50,6 +50,8 @@ export interface ToolContext {
   userId?: string;
   /** Stable identifier shared by every tool call in one inbound agent run. */
   turnId?: string;
+  /** When this agent run started (ISO). Actions proposed after it can't be approved by a bare "ok". */
+  turnStartedAt?: string;
   /** Opaque stable identity of the exact inbound iMessage. Family action
    * receipts use this instead of a process-local turn UUID. */
   sourceMessageKey?: string;

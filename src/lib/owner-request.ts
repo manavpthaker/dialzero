@@ -7,6 +7,7 @@ import type { ToolContext } from '../tools/index.js';
 import { getRecentMessagesWithMetadata } from '../db.js';
 import { getOwner } from '../config.js';
 import { approvedFamilyWords } from '../family-requests.js';
+import { ownerOwnText } from './owner-text.js';
 
 const WINDOW_MS = 30 * 60_000;
 const CALL_WORDS = /\b(call|calling|ring|phone|dial|voicemail|leave (a |them a )?(message|vm))\b/i;
@@ -23,7 +24,7 @@ export function ownerAsked(quote: string, context: ToolContext | undefined, word
   const q = norm(quote);
   if (q.length < 8 || !words.test(quote)) return false;
   if (!context?.userId || context.userId !== getOwner().id) return false;
-  const texts = [context.currentMessage ?? ''];
+  const texts = [ownerOwnText(context.currentMessage ?? '')];
   const cutoff = Date.now() - WINDOW_MS;
   for (const m of getRecentMessagesWithMetadata(context.groupKey || 'admin', 20)) {
     if (m.role === 'user' && new Date(`${m.created_at.replace(' ', 'T')}Z`).getTime() >= cutoff) texts.push(m.content);

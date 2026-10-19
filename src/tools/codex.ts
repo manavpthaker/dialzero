@@ -1,8 +1,11 @@
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, realpathSync } from 'fs';
+import { fileURLToPath } from 'url';
 import type { ToolDef } from './index.js';
 import { validateRepoName } from './path-utils.js';
 import { completeWorkRequest, createWorkRequest, failWorkRequest, startWorkRequest } from '../db.js';
+import { getOwner } from '../config.js';
+import { ownerOwnText } from '../lib/owner-text.js';
 
 // launchd's default PATH excludes Homebrew, so keep an absolute, overridable
 // path just as the old Claude runner did.
@@ -24,12 +27,35 @@ function sandboxArg(): CodexSandbox {
   return 'workspace-write';
 }
 
+// The assistant's own checkout. Codex may read it but never write: an edit
+// there would run unsandboxed on the next restart.
+const OWN_REPO = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
+function isOwnRepo(repoPath: string): boolean {
+  try { return realpathSync(repoPath) === realpathSync(OWN_REPO); } catch { return false; }
+}
+
+// What a model-started Codex run may see of the assistant's environment:
+// enough to run and authenticate Codex, none of the assistant's own tokens.
+const CODEX_ENV_KEYS = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LC_\w+|TMPDIR|TERM|CODEX_\w+|OPENAI_API_KEY|OPENAI_BASE_URL)$/;
+export function codexEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([k]) => CODEX_ENV_KEYS.test(k)));
+}
+
+// spawn_codex runs only when the owner's own message asks for code work, so a
+// web page or email read mid-turn can't start one.
+const CODE_WORDS = /\b(codex|code|coding|fix|bug|repo|build|implement|refactor|pr|pull request|commit|test|script|function|deploy|inspect|debug)\b/i;
+
 /**
  * Run Codex non-interactively in an absolute repo path. Prompt is sent over
  * stdin so large motion prompts do not hit argv limits. This function never
  * rejects; callers receive a useful status string for iMessage or a digest.
  */
-export function runCodex(repoPath: string, prompt: string, timeoutMs: number): Promise<string> {
+export function runCodex(
+  repoPath: string,
+  prompt: string,
+  timeoutMs: number,
+  opts: { env?: NodeJS.ProcessEnv; sandbox?: CodexSandbox } = {},
+): Promise<string> {
   if (!existsSync(CODEX_BIN)) {
     return Promise.resolve(
       `Codex CLI not found at ${CODEX_BIN}. Set CODEX_BIN to the absolute path of the \`codex\` CLI.`,
@@ -52,12 +78,12 @@ export function runCodex(repoPath: string, prompt: string, timeoutMs: number): P
       '--color', 'never',
       '--model', CODEX_MODEL,
       '-c', 'approval_policy="never"',
-      '--sandbox', sandboxArg(),
+      '--sandbox', opts.sandbox ?? sandboxArg(),
       '-C', repoPath,
       '-',
     ], {
       cwd: repoPath,
-      env: { ...process.env },
+      env: opts.env ?? { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -108,6 +134,11 @@ export const codexTools: ToolDef[] = [
       } catch (err) {
         return `spawn_codex rejected: ${err instanceof Error ? err.message : String(err)}`;
       }
+      if (!context || context.systemAuthored || !context.userId || context.userId !== getOwner().id
+        || !CODE_WORDS.test(ownerOwnText(context.currentMessage ?? ''))) {
+        return 'spawn_codex refused: only a live message from the owner asking for code work can start Codex. Ask them first.';
+      }
+      const readOnly = isOwnRepo(repoPath);
       const requestId = createWorkRequest({
         kind: 'codex',
         workspace: 'repo',
@@ -117,7 +148,7 @@ export const codexTools: ToolDef[] = [
         groupId: context?.groupKey,
       });
       startWorkRequest(requestId);
-      const result = await runCodex(repoPath, prompt, TOOL_TIMEOUT_MS);
+      const result = await runCodex(repoPath, prompt, TOOL_TIMEOUT_MS, { env: codexEnv(), sandbox: readOnly ? 'read-only' : undefined });
       const failed = /^(Codex CLI not found|Codex session timed out|Codex exited|Failed to spawn Codex)/.test(result);
       if (failed) failWorkRequest(requestId, result); else completeWorkRequest(requestId, result);
       return `[${requestId}]\n${result.slice(-4000)}`;

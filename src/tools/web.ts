@@ -1,4 +1,5 @@
 import { execFile } from 'child_process';
+import { lookup } from 'dns/promises';
 import { promisify } from 'util';
 import type { ToolDef } from './index.js';
 import { createOpenAIResponse, openAITextFromResponse, OPENAI_MODEL, OPENAI_ROUTER_MODEL, llmConfigured } from '../lib/openai.js';
@@ -35,11 +36,49 @@ function isPrivateHost(host: string): boolean {
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
     if (a === 0) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT / Tailscale
   }
+  // IPv4 written as IPv6 (::ffff:127.0.0.1)
+  const mapped = host.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (mapped) return isPrivateHost(mapped[1]);
   // Rough IPv6 private: anything starting fc/fd (ULA) or fe80 (link-local)
   if (/^f[cd][0-9a-f]{2}:/i.test(host)) return true;
   if (/^fe80:/i.test(host)) return true;
   return false;
+}
+
+/**
+ * GET a public page as text. Each hop is checked after DNS (a public name can
+ * point at 127.0.0.1) and curl is pinned to the checked address, and redirects
+ * are followed by hand so a 302 to localhost or a private network is refused too.
+ */
+async function fetchPublicText(start: string, maxHops = 5): Promise<string> {
+  let url = start;
+  for (let hop = 0; hop <= maxHops; hop++) {
+    const parsed = assertSafeUrl(url);
+    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+    const addrs = await lookup(host, { all: true, verbatim: true });
+    const bad = addrs.find((a) => isPrivateHost(a.address.toLowerCase()));
+    if (!addrs.length || bad) throw new Error(`web: refusing ${parsed.hostname} (resolves to ${bad?.address ?? 'nothing'})`);
+    const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    const pin = addrs[0].family === 6 ? `[${addrs[0].address}]` : addrs[0].address;
+    const { stdout } = await exec('curl', [
+      '-s', '--max-redirs', '0',
+      ...CURL_PROTO_ARGS,
+      '--resolve', `${host}:${port}:${pin}`,
+      '--max-time', '15',
+      '-A', 'Mozilla/5.0',
+      '-w', '\n__FETCH_META__%{http_code} %{redirect_url}',
+      url,
+    ], { maxBuffer: 1024 * 1024 });
+    const marker = '\n__FETCH_META__';
+    const cut = stdout.lastIndexOf(marker);
+    const body = cut >= 0 ? stdout.slice(0, cut) : stdout;
+    const [code, next] = (cut >= 0 ? stdout.slice(cut + marker.length) : '').split(' ');
+    if (!/^3\d\d$/.test(code ?? '') || !next) return body;
+    url = new URL(next, url).toString();
+  }
+  throw new Error('web: too many redirects');
 }
 
 // Pin curl to http/https for primary requests AND redirects so a 302 can't
@@ -123,13 +162,7 @@ export const webTools: ToolDef[] = [
       try {
         // Use curl to fetch, then strip HTML tags for a rough text extraction.
         // --proto pinning prevents redirects from escaping to file://, gopher://, etc.
-        const { stdout } = await exec('curl', [
-          '-sL',
-          ...CURL_PROTO_ARGS,
-          '--max-time', '15',
-          '-A', 'Mozilla/5.0',
-          url,
-        ], { maxBuffer: 1024 * 1024 });
+        const stdout = await fetchPublicText(url);
 
         // Basic HTML → text: strip tags, decode entities, collapse whitespace
         const text = stdout

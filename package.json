@@ -73,6 +73,7 @@
     "test:speech-coach": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-speech-coach.ts",
     "test:call-me": "tsx scripts/test-call-me.ts",
     "test:jobs": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-jobs.ts",
+    "test:security": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-security.ts",
     "test:followups": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-followups.ts",
     "test:calendar-alerts": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-calendar-alerts.ts",
     "test:chrome-health": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-chrome-health.ts",

@@ -342,13 +342,13 @@ export async function sendMessage(recipient: string, text: string) {
         // AppleScript chat IDs use "any;+;" or "iMessage;+;" prefix — try common prefixes
         const chatId = recipient.includes(';') ? recipient : `any;+;${recipient}`;
         await runAppleScript(
-          `tell application "Messages" to send "${chunk}" to chat id "${chatId}"`
+          `tell application "Messages" to send "${chunk}" to chat id "${asText(chatId)}"`
         );
       } else {
         await runAppleScript(
           `tell application "Messages"
   set targetService to 1st account whose service type = iMessage
-  set targetBuddy to buddy "${recipient}" of targetService
+  set targetBuddy to buddy "${asText(recipient)}" of targetService
   send "${chunk}" to targetBuddy
 end tell`
         );
@@ -368,6 +368,12 @@ end tell`
   }
 }
 
+// Recipients go inside an AppleScript string literal: escape them the same
+// way message text is, so a crafted address can't close the string.
+function asText(v: string): string {
+  return v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 // Send an image file as an iMessage attachment. The reply path is otherwise
 // text-only (sendMessage); this is the one outbound-attachment path, used by
 // computer_use's send_screenshot. Mirrors sendMessage's DM-vs-group branch.
@@ -378,13 +384,13 @@ export async function sendImageMessage(recipient: string, filePath: string): Pro
     if (isGroupChat(recipient)) {
       const chatId = recipient.includes(';') ? recipient : `any;+;${recipient}`;
       await runAppleScript(
-        `tell application "Messages" to send (POSIX file "${escapedPath}") to chat id "${chatId}"`
+        `tell application "Messages" to send (POSIX file "${escapedPath}") to chat id "${asText(chatId)}"`
       );
     } else {
       await runAppleScript(
         `tell application "Messages"
   set targetService to 1st account whose service type = iMessage
-  set targetBuddy to buddy "${recipient}" of targetService
+  set targetBuddy to buddy "${asText(recipient)}" of targetService
   send (POSIX file "${escapedPath}") to targetBuddy
 end tell`
       );
