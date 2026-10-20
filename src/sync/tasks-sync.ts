@@ -32,13 +32,17 @@ const GROCERY_KEYWORDS = [
   'sugar', 'coffee', 'tea', 'juice', 'water', 'soda', 'beer', 'wine',
   'chips', 'crackers', 'nuts', 'frozen', 'canned', 'deli', 'bakery',
   'tortilla', 'avocado', 'tomato', 'onion', 'garlic', 'pepper', 'salt',
-  'banana', 'apple', 'orange', 'lemon', 'lime', 'berries', 'mango',
+  'banana', 'apples', 'orange', 'lemon', 'lime', 'berries', 'mango',
   'shrimp', 'salmon', 'tofu', 'beans', 'lentils', 'oats', 'granola',
 ];
 
+// Whole words only, so "team" doesn't hit "tea" or "price" hit "rice". Optional
+// s/es suffix covers plurals of the singular keywords ("tomatoes"). 'apples' is
+// plural-only so a name like "Apple Academy" stays out of Groceries.
+const GROCERY_RE = new RegExp(`\\b(?:${GROCERY_KEYWORDS.join('|')})(?:e?s)?\\b`);
+
 export function isGroceryRelated(text: string): boolean {
-  const lower = text.toLowerCase();
-  return GROCERY_KEYWORDS.some((kw) => lower.includes(kw));
+  return GROCERY_RE.test(text.toLowerCase());
 }
 
 let cachedClient: tasks_v1.Tasks | null = null;

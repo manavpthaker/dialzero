@@ -91,6 +91,15 @@ try {
     assert.match(rule, /ONE QUESTION PER TURN/);
   });
 
+  await check('echo: the assistant\'s own voice coming back is not their turn', () => {
+    assert.equal(phone.isEcho('Hi, yes.', 'Hi, yes! Just listening.'), true);
+    assert.equal(phone.isEcho('Hi, this is Sam.', 'Hi, this is Sam, Alex Rivera\'s assistant. What time is it right now?'), true);
+    assert.equal(phone.isEcho('Understood.', 'Understood, I\'ll stay on the line.'), false, 'one word is never dropped');
+    assert.equal(phone.isEcho('Yes.', 'Hi, yes! Do you have a moment?'), false);
+    assert.equal(phone.isEcho('Example Fence, how can I direct your call? Hello?', 'Hi, yes! I\'m calling for Alex. Do you have a moment?'), false);
+    assert.equal(phone.isEcho('Um, is this for your home or business?', 'It\'s for a home installation.'), false);
+  });
+
   await check('call_now only skips the gate for the owner\'s own words asking for a call', async () => {
     const { ownerAskedForCall } = await import('../src/tools/errands.js');
     const msg = 'Call springfield waste management they haven\'t picked up our grass clippings, leave a message with my address';

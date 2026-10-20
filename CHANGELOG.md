@@ -16,6 +16,8 @@ Dial Zero's code is ported most nights from the author's own assistant, so `main
 - **"X done" closes the task.** Saying something is finished closes the matching open task even if the reply forgot to.
 - **Omi is read more carefully**: once a conversation has settled, skipping tiny fragments and double recordings, and reusing the contact you meant by a first name.
 - **Speaking coach** (with Omi): how much you talked vs listened, questions and fillers per conversation, a debrief after long work calls, a Sunday summary, and "how did I do in that call?".
+- **Business calls stop answering themselves.** Phone lines can echo the assistant's own voice back; a turn that is mostly its own words is now dropped instead of answered, which ended the doubled intros and "Hi, yes" loops that made businesses hang up. `PHONE_ECHO_GUARD=false` turns it off.
+- **Grocery list matches whole words.** "team" no longer lands in Groceries because of "tea", nor "price" because of "rice".
 - **CONTRIBUTING** explains that code is ported nightly from the author's own assistant, so pull requests are welcome but re-applied by hand, and lists the most useful first contributions.
 
 ## v0.1.0 (2026-10-20)

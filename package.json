@@ -61,6 +61,7 @@
     "test:family-smarter": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-family-smarter.ts",
     "test:family-durable-inbox": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-family-durable-inbox.ts",
     "test:errands": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-errands.ts",
+    "test:grocery-match": "tsx scripts/test-grocery-match.ts",
     "test:send-now": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-send-now.ts",
     "test:web-booking": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-web-booking.ts",
     "test:wakeup": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-wakeup.ts",

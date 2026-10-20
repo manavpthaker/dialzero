@@ -767,6 +767,29 @@ function receptionSessionConfig(call: ErrandCall) {
  */
 export const PICKUP_SPEAK_MS = 3_000;
 
+/**
+ * Line echo: phone lines send the assistant's own voice back, and the realtime session
+ * can hear it as the other side ("Bot: Hi, yes! … Them: Hi, yes."), then answer itself:
+ * doubled intros, "Hi, yes" loops, and businesses hanging up. A heard turn that started
+ * while the assistant was talking and is mostly its own words (2+ words) is echo.
+ * Exported for tests.
+ */
+export function isEcho(heard: string, botSaid: string): boolean {
+  const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').split(/\s+/).filter(Boolean);
+  const h = words(heard);
+  if (h.length < 2) return false;
+  const said = new Set(words(botSaid));
+  return h.filter((w) => said.has(w)).length / h.length >= 0.75;
+}
+/** Business calls (not reception, barge-in off) answer turns through the echo guard. PHONE_ECHO_GUARD=false turns it off. */
+function echoGuardOn(call: PendingCall): boolean {
+  return call.kind === 'errand' && !call.reception && env('PHONE_BARGE_IN', 'false') !== 'true' && env('PHONE_ECHO_GUARD', 'true') !== 'false';
+}
+/** How long after the assistant's estimated last word a heard turn can still be its echo. */
+const ECHO_TAIL_MS = 1_500;
+/** Rough speaking pace for estimating when the assistant's audio stops playing. */
+const MS_PER_BOT_WORD = 380;
+
 /** The opener rule for outbound errand calls (exported for tests). */
 export function openerRule(bot: string, full: string): string {
   return `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, ${full}'s assistant. I'd like to make a reservation for tomorrow, do you have a moment?" Always say you're their assistant ("Hi, this is ${bot}, ${full}'s assistant"); never "calling for ${full}", which sounds like you're looking for them there. Introduce yourself ONCE per call: if they talk over you or say "hello?" again, never restart the intro; say "Hi, yes!" and ask your question in a few words. Never say "thanks for holding" unless they actually put you on hold. Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone.
@@ -991,6 +1014,59 @@ function runCall(callId: string, call: PendingCall): void {
     startTimers(speakAfterMs);
   }
 
+  // Echo guard (business calls): the session doesn't answer on its own (create_response
+  // false); a heard turn gets an answer at once unless it started while the assistant was talking,
+  // in which case its words are checked first and its own echo is dropped.
+  const echoGuard = echoGuardOn(call);
+  let botStartedAt = 0;
+  let botEndsAt = 0;
+  let recentBot: string[] = [];
+  let echoes = 0;
+  let respondAfterDone = false;
+  const suspect = new Set<string>();
+  const echoIds = new Set<string>();
+  const waiting = new Map<string, ReturnType<typeof setTimeout>>();
+  const respond = () => {
+    if (ended) return;
+    if (talking) { respondAfterDone = true; return; }
+    send({ type: 'response.create' });
+  };
+  const settle = (itemId: string, echo: boolean) => {
+    const t = waiting.get(itemId);
+    if (!t) return;
+    clearTimeout(t);
+    waiting.delete(itemId);
+    if (echo) {
+      echoes++;
+      echoIds.add(itemId);
+      send({ type: 'conversation.item.delete', item_id: itemId });
+    } else respond();
+  };
+  const onEchoGuardEvent = (ev: Record<string, any>) => {
+    const now = Date.now();
+    if (ev.type === 'response.created') { botStartedAt = now; botEndsAt = Infinity; }
+    else if (ev.type === 'response.output_audio_transcript.done' && ev.transcript) {
+      const said = String(ev.transcript);
+      recentBot = [...recentBot, said].slice(-2);
+      botEndsAt = botStartedAt + said.split(/\s+/).length * MS_PER_BOT_WORD;
+    } else if (ev.type === 'output_audio_buffer.stopped') botEndsAt = now;
+    else if (ev.type === 'response.done') {
+      if (botEndsAt === Infinity) botEndsAt = now;
+      if (respondAfterDone) { respondAfterDone = false; setTimeout(() => respond(), 0); }
+    } else if (ev.type === 'input_audio_buffer.speech_started' && ev.item_id) {
+      if (now < botEndsAt + ECHO_TAIL_MS) suspect.add(String(ev.item_id));
+    } else if (ev.type === 'input_audio_buffer.committed' && ev.item_id) {
+      const id = String(ev.item_id);
+      if (!suspect.has(id)) { respond(); return; }
+      // No transcript in time: treat it as them, as before.
+      waiting.set(id, setTimeout(() => settle(id, false), 2_500));
+    } else if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.item_id && suspect.has(String(ev.item_id))) {
+      settle(String(ev.item_id), isEcho(String(ev.transcript ?? ''), recentBot.join(' ')));
+    } else if (ev.type === 'conversation.item.input_audio_transcription.failed' && ev.item_id) {
+      settle(String(ev.item_id), false);
+    }
+  };
+
   ws.on('open', () => {
     console.log(`[phone] control socket open for ${call.kind} call ${callId}`);
     // Voicemail picked up a "call me": hang up and text the owner instead of talking to it.
@@ -1025,13 +1101,16 @@ function runCall(callId: string, call: PendingCall): void {
     if (call.kind === 'errand' && call.reception && (ev.type === 'error' || /failed/.test(ev.type))) {
       console.warn(`[phone] reception ${ev.type}: ${JSON.stringify(ev.error ?? ev).slice(0, 300)}`);
     }
+    if (echoGuard) onEchoGuardEvent(ev);
     if (ev.type === 'response.done') talking = false;
     if (ev.type === 'conversation.item.input_audio_transcription.completed') {
       // Sound over the assistant that came to no words was noise, not the other side.
       if (pendingOverTalk && !String(ev.transcript ?? '').trim()) noiseOverTalk++;
       pendingOverTalk = false;
     }
-    if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
+    if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.item_id && echoIds.has(String(ev.item_id))) {
+      // The assistant's own echo: not something they said.
+    } else if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
       heardOwner = true;
       transcript.push(`${call.kind === 'owner' ? 'You' : 'Them'}: ${String(ev.transcript).trim()}`);
       if (wake && isRealWakeAnswer(String(ev.transcript))) wakeAnswers++;
@@ -1135,6 +1214,8 @@ function runCall(callId: string, call: PendingCall): void {
     if (deadAir) clearTimeout(deadAir);
     if (ownerDeadAir) clearTimeout(ownerDeadAir);
     if (overTalk) console.log(`[phone] ${callId}: sound over the assistant ${overTalk}x, ${noiseOverTalk} of them no words (noise)`);
+    for (const t of waiting.values()) clearTimeout(t);
+    if (echoes) console.log(`[phone] ${callId}: dropped ${echoes} echo turn(s) of the assistant's own voice`);
     if (handedOff) {
       console.log(`[phone] ${callId} handed off to the next menu step`);
       return;
@@ -1321,7 +1402,7 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
         turn_detection: call.kind === 'errand' && call.reception
           ? { type: 'server_vad', silence_duration_ms: 600 }
           : call.kind === 'errand' && env('PHONE_BARGE_IN', 'false') !== 'true'
-            ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false }
+            ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false, ...(echoGuardOn(call) ? { create_response: false } : {}) }
             : call.kind === 'owner' && !ownerBargeIn
               ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false }
               : { type: 'semantic_vad' },
