@@ -13,6 +13,7 @@ import { OPENAI_MODEL, openAIText } from './lib/openai.js';
 import { extractFirstJson } from './lib/daemon.js';
 import { withLlmContext } from './lib/llm-context.js';
 import { todayET } from './lib/time-et.js';
+import { ensureCallLog } from './call-log.js';
 import { getBotName } from './config.js';
 
 const db = dbh as unknown as { prepare: (sql: string) => { get: (...a: unknown[]) => unknown; all: (...a: unknown[]) => unknown[] } };
@@ -20,6 +21,27 @@ const one = <T>(sql: string, ...a: unknown[]) => db.prepare(sql).get(...a) as T;
 const all = <T>(sql: string, ...a: unknown[]) => db.prepare(sql).all(...a) as T[];
 
 export interface Scorecard { text: string; numbers: Record<string, number> }
+
+/** Real calls only: not the daily practice call, not owner test calls. */
+const REAL_CALL = `r.goal NOT LIKE 'CANARY%' AND r.goal NOT LIKE 'TEST%' AND COALESCE(json_extract(r.envelope_json, '$.silent'), 0) != 1`;
+
+export function callStatusOf(detail: string): string {
+  return detail.match(/^[^:]*: (done|retry_later|voicemail|blocked|failed)/)?.[1] ?? 'other';
+}
+
+/** A live person spoke. The after-call review says so; older rows are judged by their transcript lines. */
+export function personSpoke(detail: string): boolean {
+  const by = detail.match(/answered by (\w+)/)?.[1];
+  if (by) return by === 'person';
+  return /\nThem: /.test(detail) && callStatusOf(detail) !== 'voicemail' && !/\nMenu: /.test(detail);
+}
+
+/** The assistant ended the call itself with its wrap-up (end_call), rather than the line ending on it. */
+export function botWrappedUp(detail: string): boolean {
+  const ended = detail.match(/ended: ([a-z ]+)/)?.[1];
+  if (ended) return ended === 'bot end call';
+  return !/no one engaged|ended without a recorded outcome|No one picked up|busy/i.test(detail);
+}
 
 export function buildScorecard(days = 7): Scorecard {
   const since = `-${days} days`;
@@ -32,12 +54,29 @@ export function buildScorecard(days = 7): Scorecard {
   n.web_started = jobCount(); n.web_done = jobCount('done'); n.web_failed = jobCount('failed');
   n.web_stopped = jobCount('stopped'); n.web_waiting = jobCount('waiting_on_you') + jobCount('working');
 
-  // Calls: every dial, and what each one came to.
-  n.calls = one<{ c: number }>(`SELECT COUNT(*) c FROM errand_events e JOIN errands r ON r.id = e.errand_id WHERE e.type='dialing' AND r.goal NOT LIKE 'CANARY%' AND e.at > datetime('now', ?)`, since).c;
-  const results = all<{ detail: string }>(`SELECT e.detail FROM errand_events e JOIN errands r ON r.id = e.errand_id WHERE e.type='call_result' AND r.goal NOT LIKE 'CANARY%' AND e.at > datetime('now', ?)`, since);
-  const statusOf = (d: string) => d.match(/^[^:]*: (done|retry_later|voicemail|blocked|failed)/)?.[1] ?? 'other';
-  n.calls_done = results.filter((r) => statusOf(r.detail) === 'done').length;
-  n.calls_reached = results.filter((r) => !/no one engaged|ended without a recorded outcome|No one picked up|busy/i.test(r.detail)).length;
+  // Calls: every real dial (practice and test calls left out), and three separate
+  // numbers per call: a person spoke, the assistant wrapped up, the goal was met.
+  // "Reached" used to count only calls the assistant wrapped up itself, so a week
+  // could say 0 reached although people answered several calls.
+  n.calls = one<{ c: number }>(`SELECT COUNT(*) c FROM errand_events e JOIN errands r ON r.id = e.errand_id WHERE e.type='dialing' AND ${REAL_CALL} AND e.at > datetime('now', ?)`, since).c;
+  const results = all<{ detail: string }>(`SELECT e.detail FROM errand_events e JOIN errands r ON r.id = e.errand_id WHERE e.type='call_result' AND ${REAL_CALL} AND e.at > datetime('now', ?)`, since);
+  n.calls_done = results.filter((r) => callStatusOf(r.detail) === 'done').length;
+  n.calls_reached = results.filter((r) => personSpoke(r.detail)).length;
+  n.calls_wrapped = results.filter((r) => botWrappedUp(r.detail)).length;
+  ensureCallLog();
+  const practice = all<{ transcript: string | null }>(`SELECT transcript FROM call_log WHERE practice = 1 AND target = 'NIST time line' AND created_at > datetime('now', ?)`, since);
+  n.practice_calls = practice.length;
+  n.practice_clean = practice.filter((p) => !/\] Bot: /.test(p.transcript ?? '')).length;
+  const replies = all<{ m: number | null }>(`SELECT median_reply_ms m FROM call_log WHERE practice = 0 AND median_reply_ms IS NOT NULL AND created_at > datetime('now', ?)`, since)
+    .map((r) => r.m as number).sort((a, b) => a - b);
+  n.reply_median_ms = replies.length ? replies[Math.floor((replies.length - 1) / 2)] : 0;
+  // The practice line (src/practice-line.ts): scripted scenes, graded on how the assistant behaved.
+  const scenes = all<{ value: string }>(`SELECT value FROM memory WHERE group_id = 'practice' AND key LIKE 'result_%' AND updated_at > datetime('now', ?)`, since)
+    .map((r) => { try { return JSON.parse(r.value) as { scene: string; pass: boolean }; } catch { return null; } })
+    .filter((g): g is { scene: string; pass: boolean } => !!g);
+  n.practice_scenes = scenes.length;
+  n.practice_scenes_passed = scenes.filter((g) => g.pass).length;
+  const failedScenes = [...new Set(scenes.filter((g) => !g.pass).map((g) => g.scene))];
   n.calls_phone_down = one<{ c: number }>(`SELECT COUNT(*) c FROM errand_events WHERE type='phone_down' AND at > datetime('now', ?)`, since).c;
 
   // The checker.
@@ -63,7 +102,7 @@ export function buildScorecard(days = 7): Scorecard {
   const pct = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : '—');
   const lines = [
     `Website jobs: ${n.web_done} of ${n.web_started} finished (${pct(n.web_done, n.web_started)}); ${n.web_failed} failed, ${n.web_stopped} stopped, ${n.web_waiting} still open.`,
-    `Calls: ${n.calls} dials, ${n.calls_reached} reached someone, ${n.calls_done} got the job done (${pct(n.calls_done, n.calls)}).${n.calls_phone_down ? ` ${n.calls_phone_down} lost to the phone link being down.` : ''}`,
+    `Calls: ${n.calls} dials; a person spoke on ${n.calls_reached}, ${getBotName()} wrapped up ${n.calls_wrapped}, ${n.calls_done} got the job done (${pct(n.calls_done, n.calls)}).${n.calls_phone_down ? ` ${n.calls_phone_down} lost to the phone link being down.` : ''}${n.reply_median_ms ? ` Typical reply delay ${(n.reply_median_ms / 1000).toFixed(1)}s.` : ''}${n.practice_calls ? ` Practice calls: ${getBotName()} stayed quiet on ${n.practice_clean} of ${n.practice_calls}.` : ''}${n.practice_scenes ? ` Practice line: ${n.practice_scenes_passed} of ${n.practice_scenes} scenes passed${failedScenes.length ? ` (failed: ${failedScenes.join(', ')})` : ''}.` : ''}`,
     `Checker: caught ${n.checker_caught} "done" that wasn't.`,
     `Asked you ${n.asks} question${n.asks === 1 ? '' : 's'}; ${n.texts} texts in all.`,
     `Your list: ${n.tasks_open} open (${n.tasks_overdue} overdue); ${n.tasks_added} added, ${n.tasks_done} done this week.`,

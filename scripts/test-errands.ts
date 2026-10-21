@@ -58,7 +58,7 @@ try {
     if ('error' in p) return;
     assert.match(p.summary, /Calls: Quick Lube Springfield 732-555-2142 \(backup: Oil Stop Riverside\), up to 4x/);
     assert.match(p.summary, /Shares: Name: Alex Rivera/);
-    assert.match(p.summary, /No transcript \("keep transcript" to record\)/);
+    assert.match(p.summary, /Transcript kept 30 days for call review \("keep transcript" keeps it\)/);
     assert.ok(p.summary.split('\n').length <= 5, 'summary stays short');
   });
 
@@ -81,14 +81,61 @@ try {
     assert.equal(phone.isFictionalNumber('+12125552368'), false);
   });
 
-  await check('opener: wait out their greeting, introduce once, no "thanks for holding"', () => {
+  await check('opener: wait out their greeting, one sentence saying AI (and recorded), no "Hi, yes!"', () => {
     assert.ok(phone.PICKUP_SPEAK_MS >= 2_500, 'speak-first after pickup must outlast a normal greeting');
-    const rule = phone.openerRule('Assistant', 'Alex Rivera');
+    const rule = phone.openerRule('Assistant', 'Alex Rivera', true);
     assert.match(rule, /let them finish their greeting/);
-    assert.match(rule, /Introduce yourself ONCE/);
-    assert.match(rule, /never restart the intro/);
+    assert.match(rule, /"Hi, this is Assistant, Alex Rivera's AI assistant, on a recorded line\. <your question>\?"/);
     assert.match(rule, /Never say "thanks for holding"/);
-    assert.match(rule, /ONE QUESTION PER TURN/);
+    assert.doesNotMatch(rule, /Hi, yes/, 'the "Hi, yes!" rule turned into restarts and echo loops');
+    assert.doesNotMatch(phone.openerRule('Assistant', 'Alex Rivera', false), /recorded/, 'no recording notice when nothing is recorded');
+    assert.doesNotMatch(phone.conversationRule(), /Hi, yes|introduce/i);
+    assert.match(phone.afterIntroRule(), /ALREADY introduced yourself.*Never introduce yourself again/s);
+  });
+
+  await check('session: the opener is swapped for "already introduced" once it has been said; voicemail gives a callback number', () => {
+    process.env.PHONE_CALLBACK_NUMBER = '+12025550143';
+    const call = { kind: 'errand' as const, actionId: 1, to: '+17325552142', name: 'Example Auto', personId: null, goal: 'Book an oil change', context: 'Name: Alex Rivera', keepTranscript: false };
+    const first = phone.errandSessionConfig(call).instructions;
+    const later = phone.errandSessionConfig(call, { introduced: true }).instructions;
+    assert.match(first, /Your first turn is ONE sentence/);
+    assert.doesNotMatch(later, /Your first turn is ONE sentence/);
+    assert.match(later, /ALREADY introduced yourself/);
+    assert.match(first, /ONE QUESTION PER TURN/);
+    assert.match(later, /ONE QUESTION PER TURN/, 'the conversation rules stay');
+    assert.match(first, /Once THEY say goodbye.*call end_call in the same turn\. Never start a new question after their goodbye/s);
+    assert.match(first, /BEFORE you say goodbye.*If they already told you their name.*don't ask/s);
+    assert.match(first, /wait for the beep.*a number to call back: the one in the details you may share if there is one, otherwise 2 0 2, 5 5 5, 0 1 4 3/s);
+    delete process.env.PHONE_CALLBACK_NUMBER;
+  });
+
+  await check('intro detection: what counts as the assistant saying who it is', () => {
+    assert.equal(phone.isIntro("Hi, this is Assistant, Alex Rivera's AI assistant, on a recorded line. Do you have a table?", 'Assistant'), true);
+    assert.equal(phone.isIntro("I'm Assistant, calling about a roof.", 'Assistant'), true);
+    assert.equal(phone.isIntro('Sorry, I\'m calling about a table for tomorrow night.', 'Assistant'), false, 'a repair is not an intro');
+    assert.equal(phone.isIntro('Thursday at 4 works.', 'Assistant'), false);
+    assert.equal(phone.spellNumber('+12025550143'), '2 0 2, 5 5 5, 0 1 4 3');
+  });
+
+  await check('reply gate: waits a beat after a pause, holds back if they keep talking', async () => {
+    const { ReplyGate } = await import('../src/lib/reply-gate.js');
+    let fired = 0;
+    const pending: Array<() => void> = [];
+    const timers = { set: (fn: () => void) => { pending.push(fn); return pending.length as unknown as ReturnType<typeof setTimeout>; }, clear: () => { pending.length = 0; } };
+    const gate = new ReplyGate(() => { fired++; }, 700, timers);
+    gate.turnEnded();                 // "Sure, I can help with that."
+    gate.theyStarted();               // "…We have Thursday at 4…"
+    assert.equal(fired, 0);
+    assert.equal(gate.yields, 1);
+    assert.equal(gate.waiting, false);
+    gate.turnEnded();                 // "…Which works better?"
+    pending.shift()?.();              // the beat passes with silence
+    assert.equal(fired, 1);
+    gate.theyStarted();               // talking after the assistant answered: nothing to hold
+    assert.equal(gate.yields, 1);
+    const now = new ReplyGate(() => { fired++; }, 0, timers);
+    now.turnEnded();
+    assert.equal(fired, 2, 'PHONE_YIELD_MS=0 answers at once, as before');
   });
 
   await check('echo: the assistant\'s own voice coming back is not their turn', () => {
@@ -117,6 +164,25 @@ try {
     assert.ok('error' in blocked && /personal contact/.test(blocked.error));
     const ok = errands.prepareErrand({ ...base, targets: [{ name: 'Priya', phone: '732-555-2177' }], personal_ok: true });
     assert.ok(!('error' in ok));
+  });
+
+  await check("a business saved in the owner's contacts is called like any business", () => {
+    // A dentist's office synced from the address book was refused as a personal contact.
+    db.upsertPerson({ name: 'Example Dental Arts', phones: ['202-555-2195'] });
+    const p = errands.prepareErrand({ ...base, targets: [{ name: 'Example Dental Arts', phone: '202-555-2195' }] });
+    assert.ok(!('error' in p), 'error' in p ? p.error : '');
+    assert.equal(errands.isBusinessContact({ name: 'Springfield Public Works' }), true);
+    assert.equal(errands.isBusinessContact({ name: 'Joe', relationship: 'vendor' }), true);
+    assert.equal(errands.isBusinessContact({ name: 'Acme', company: 'Acme' }), true);
+    assert.equal(errands.isBusinessContact({ name: 'Priya Test' }), false);
+    assert.equal(errands.isBusinessContact({ name: 'Art Shopper' }), false, 'whole words only');
+  });
+
+  await check("call_now passes the owner's OK for a personal contact through", async () => {
+    const { errandTools } = await import('../src/tools/errands.js');
+    const callNow = errandTools.find((t) => t.definition.name === 'call_now')!;
+    const props = (callNow.definition.input_schema as { properties: Record<string, unknown> }).properties;
+    assert.ok(props.personal_ok, "call_now must accept personal_ok, or the owner's yes can never get through");
   });
 
   await check('max_calls is capped at 8 and duplicate numbers collapse', () => {
@@ -270,6 +336,31 @@ try {
     const ev = db.getErrandEvents(id).find((e) => e.type === 'call_result')!;
     assert.match(ev.detail!, /Menu: Pressed 3 \(sanitation\)/);
     assert.match(errands.addErrandNote(id, 'try again'), /back on/);
+  });
+
+  await check('a dropped call says what the after-call review found, and a left voicemail is done', async () => {
+    const { applyReview } = await import('../src/call-log.js');
+    const p = errands.prepareErrand({ ...base, targets: [base.targets[0]], max_calls: 2 });
+    if ('error' in p) throw new Error(p.error);
+    const mk = () => {
+      const id = db.createErrand({ action_id: null, goal: 'x', deadline: null, envelope_json: JSON.stringify({ ...p.payload, reply_mode: true }) });
+      db.addErrandEvent(id, 'dialing', '[t0] test, action #0');
+      return id;
+    };
+    const dropped = { status: 'retry_later' as const, outcome: 'The call ended without a recorded outcome.', followUp: '', transcriptTail: '', botSaid: 'Hi, this is Assistant.', endedWithoutOutcome: true };
+    const a = mk();
+    await errands.applyCallResult(a, {
+      ...applyReview(dropped, { answeredBy: 'person', goalMet: false, verdict: 'progress', summary: 'They offered Thursday at 4.', learned: 'Thu 4pm open.', nextStep: 'OK to book Thursday at 4?' }),
+      reviewLine: 'Review: progress; answered by person; ended: they hung up',
+    });
+    assert.equal(db.getErrand(a)!.status, 'waiting');
+    const t = told.filter((x) => x.id === a)[0];
+    assert.match(t.text, /They offered Thursday at 4\. OK to book Thursday at 4\?/);
+    assert.doesNotMatch(t.text, /likely their voicemail/);
+    assert.match(db.getErrandEvents(a).find((e) => e.type === 'call_result')!.detail!, /\nReview: progress; answered by person/);
+    const b = mk();
+    await errands.applyCallResult(b, applyReview(dropped, { answeredBy: 'voicemail', goalMet: false, verdict: 'voicemail_left', summary: 'Left a message after the beep.', learned: '', nextStep: '' }));
+    assert.equal(db.getErrand(b)!.status, 'done');
   });
 
   await check('restart recovery: finds an unanswered message and clears its half-saved row', () => {

@@ -672,6 +672,7 @@ export function loadSystemBlocks(
 
     staticParts.push(`\n--- Say only what happened ---`);
     staticParts.push('Never say you are calling, booking, sending, cancelling, or that something is done, unless a tool in THIS turn returned success for it. If the owner says "yes" / "do it", call the tool first (call_now, do_online, send_now, answer_job…), then report what the tool returned. If no tool can do it, or it failed, say that plainly.');
+    staticParts.push('Asked how a call went or what was said ("what did you say", "did they pick up", "did it go through"): call list_errands (include_finished: true, then the errand id for its log) and answer from what it shows: who answered, voicemail or not, and what the assistant said. Never guess that a call didn\'t connect.');
 
     staticParts.push(`\n--- Anticipate ---`);
     staticParts.push('After answering, briefly consider: is there anything worth remembering? Does this imply a follow-up task? Should this go on the calendar? If yes to any, do it before ending the turn — don\'t ask permission for low-stakes saves. Prefer save_fact over remember whenever you can name a subject (person, project, entity).');

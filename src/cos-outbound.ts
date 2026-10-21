@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import {
   getMemory, setMemory, deleteMemory, getRecentMemory,
   logOutbound, lastSentForSubject, countSentSince, findDuplicateSince, subjectHistorySince,
+  saveMessage,
 } from './db.js';
 import { sendMessage, getDefaultRecipient } from './channels/imessage.js';
 import { toPlainText } from './lib/plaintext.js';
@@ -254,6 +255,12 @@ export interface OutboundDeps {
   getDefaultRecipient: () => string | null | undefined;
   /** Injectable so the rules can be tested at a deterministic hour. */
   isQuietHours: () => boolean;
+  /** Records a text sent to the owner in their thread. Defaults to the admin thread. */
+  remember?: (text: string) => void;
+}
+
+function rememberInOwnerThread(text: string): void {
+  saveMessage('admin', 'assistant', 'assistant', text);
 }
 
 // Injectable so the arbitration rules can be tested without an iMessage
@@ -339,6 +346,17 @@ export async function sendInterrupt(
     import('./phone.js')
       .then((m) => m.callOwner(shaped))
       .catch((err) => console.error('[cos-outbound] ring failed:', err));
+  }
+
+  // What reached the owner's phone goes into their DM thread too, so the next turn
+  // knows it was said. Without it, a texted voicemail result was missing from
+  // history, and asked "what did you say", the assistant said the call never connected.
+  if (to === deps.getDefaultRecipient()) {
+    try {
+      (deps.remember ?? rememberInOwnerThread)(shaped);
+    } catch (err) {
+      console.error('[cos-outbound] failed to save sent text to the thread:', err);
+    }
   }
 
   // Observe mode: the verdict is recorded as a counterfactual, but `decision`

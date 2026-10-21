@@ -7,7 +7,7 @@ Plain answers to "where does my stuff go?"
 - **Everything it remembers**: facts about you and your people, your to-do list, reminders, conversation history, the log of what it did. One SQLite file in the project folder (`assistant.db` by default).
 - **Your profile and prompts**: `config/profile.json` and the files in `context/`.
 - **Your keys**: `.env`.
-- **Call transcripts**, only if you asked to keep them.
+- **Call transcripts.** Business calls are kept in the call log for 30 days (`CALL_LOG_KEEP_DAYS`) so they can be reviewed, then cleared; the numbers (how long, who answered, the outcome) stay. Say "keep transcript" on an errand to keep that one.
 
 None of these are in the project's git history, and they're listed in `.gitignore` so you can't commit them by accident.
 
@@ -15,7 +15,7 @@ None of these are in the project's git history, and they're listed in `.gitignor
 
 - **To your AI provider (Anthropic for Claude, or OpenAI):** each message you send it, plus the relevant memories it pulls in to answer, and the results of tools it uses (for example, the calendar events it read). That's how the model understands and answers. Your provider's API data policy applies; both Anthropic and OpenAI state that API data isn't used to train their models by default. If you turn on a local model (Ollama), background work like reading your messages for facts happens on your Mac instead.
 - **To Google:** calendar, to-do and email requests, when you've connected Google.
-- **To Twilio and OpenAI's voice model:** call audio, when you've set up phone calls. The audio goes straight from Twilio to OpenAI; it doesn't pass through your Mac.
+- **To Twilio and OpenAI's voice model:** call audio, when you've set up phone calls. The audio goes straight from Twilio to OpenAI; it doesn't pass through your Mac. After a business call ends, its text transcript goes to your AI provider once more for the call review.
 - **To the people and businesses you ask it to contact:** the texts, emails and calls you asked for, with only the details you approved.
 
 ## What it does without asking

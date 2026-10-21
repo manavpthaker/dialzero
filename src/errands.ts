@@ -155,6 +155,20 @@ function fmtPhone(e164: string): string {
   return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : e164;
 }
 
+const BUSINESS_NAME = /\b(dental|dentistry|dentists?|orthodont\w*|clinic|medical|hospital|pharmacy|urgent care|pediatrics?|physicians|office|center|centre|associates|llc|inc|corp|company|services?|systems|school|academy|daycare|library|township|county|department|dept|public works|rec|recreation|ymca|church|salon|spa|barbershop|studio|restaurant|cafe|diner|pizzeria|pizza|deli|bakery|grill|market|store|shop|bank|insurance|realty|attorneys?|law firm|auto|motors|garage|repair|plumbing|heating|hvac|electric|roofing|fence|landscaping|cleaners|hotel|veterinary|animal hospital)\b/i;
+
+/**
+ * A saved contact that is really a business ("Example Dental Arts" synced from the
+ * owner's address book): the FCC consent rule is about people's phones, not offices.
+ * Without this a dentist's office was refused as a "personal contact".
+ */
+export function isBusinessContact(person: { name: string; company?: string | null; relationship?: string | null }): boolean {
+  const name = person.name.trim();
+  if (/\b(business|vendor|provider|service)\b/i.test(person.relationship ?? '')) return true;
+  if (person.company && person.company.trim().toLowerCase() === name.toLowerCase()) return true;
+  return BUSINESS_NAME.test(name);
+}
+
 /**
  * Validate an errand proposal and write its summary from the payload, so the
  * owner approves the real envelope (same Preparer contract as send/call).
@@ -183,7 +197,7 @@ export function prepareErrand(p: Record<string, unknown>): Prepared {
     // AI-voice calls to a person's cell need their prior consent (FCC 2024);
     // errands default to businesses. A known contact needs an explicit OK.
     const person = findPersonByPhone(dial);
-    if (person && !personalOk) {
+    if (person && !personalOk && !isBusinessContact(person)) {
       return { error: `${fmtPhone(dial)} belongs to ${person.name}, a personal contact. Errands call businesses; to call a person, confirm they're OK getting a call from ${getBotName()}, then pass personal_ok: true.` };
     }
     const hours = parseHours(t.hours);
@@ -208,7 +222,7 @@ export function summarizeEnvelope(e: Envelope): string {
     `🧾 ${e.goal}${e.deadline ? `, by ${e.deadline}` : ''}${e.window ? `, aiming for ${e.window}` : ''}`,
     `Calls: ${who}, up to ${e.max_calls}x`,
     e.share ? `Shares: ${e.share}` : '',
-    e.keep_transcript ? 'Keeping a transcript' : 'No transcript ("keep transcript" to record)',
+    e.keep_transcript ? 'Keeping a transcript' : 'Transcript kept 30 days for call review ("keep transcript" keeps it)',
     ...e.notes.map((n) => `Note: ${n}`),
   ];
   return lines.filter(Boolean).join('\n');
@@ -596,7 +610,7 @@ export async function processErrand(id: number): Promise<void> {
     try {
       const sid = await placeErrandCall({
         errandId: id, actionId, to: target.phone, name: target.name,
-        goal: brief.goal, context: brief.context, keepTranscript: env.keep_transcript,
+        goal: brief.goal, context: brief.context, keepTranscript: env.keep_transcript, practice: !!env.silent,
       });
       if (sid) addErrandEvent(id, 'twilio', sid);
     } catch (err) {
@@ -647,6 +661,7 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
 
   const line = `${target.name}: ${result.status} — ${result.outcome}${result.followUp ? ` (next: ${result.followUp})` : ''}`;
   const extra = [
+    result.reviewLine ?? '',
     result.menuLog?.length ? `Menu: ${result.menuLog.join('; ')}` : '',
     result.botSaid ? `${getBotName()} said: ${result.botSaid}` : '',
     result.transcriptTail,
@@ -659,9 +674,14 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
   // The owner asked for this call and the line ended mid-way after the bot had spoken
   // (often a voicemail cutting off). Say what was said instead of quietly
   // retrying tomorrow; a reply like "try again" resumes it.
-  if (env.reply_mode && result.endedWithoutOutcome && result.botSaid) {
+  // A review that found a voicemail was left goes on to the voicemail case below.
+  if (env.reply_mode && result.endedWithoutOutcome && result.botSaid && result.review?.verdict !== 'voicemail_left') {
     block(fresh, 'The line ended before the call wrapped up.');
-    await tellOwner(fresh, 'blocked', `the line ended before I could wrap up (likely their voicemail cutting off). I said: "${result.botSaid.slice(0, 220)}". Say "try again" and I'll call back.`);
+    // The after-call review read the whole call, so say what it found rather than guess.
+    const what = result.review
+      ? `${result.outcome}${result.followUp ? ` ${result.followUp}` : ''}`
+      : `the line ended before I could wrap up (likely their voicemail cutting off). I said: "${result.botSaid.slice(0, 220)}".`;
+    await tellOwner(fresh, 'blocked', `${what} Say "try again" and I'll call back.`);
     return;
   }
 

@@ -96,7 +96,7 @@ After calling this, DM the owner the exact text returned.`,
 Requirements, or it refuses:
 - owner_request: their exact words asking for the call, copied from their message (this message or one in the last 30 minutes).
 - A REAL number. Get it from what they said or their contacts (find_person); otherwise LOOK IT UP YOURSELF with web_search (try 2-3 phrasings, prefer the official site, fetch_url it if needed) and pass the page in number_source. Pick the department that handles their issue, not a main switchboard, when the site lists one. Never guess or invent a number, and only ask them after your searches come up empty.
-- Businesses only. Calling a person needs their OK to get a call from the assistant.
+- Businesses only. Calling a person in the owner's contacts needs the owner's OK that they're fine getting a call from the assistant: ask once, and when the owner says yes, call again with personal_ok: true.
 - share: only what the call needs, with values (e.g. "Address 12 Oak St; cell 212-555-2368").
 Use start_errand instead when it will take calling around or several tries over days, and propose_action with place_call when the call is YOUR idea, not their request.`,
       input_schema: {
@@ -109,13 +109,14 @@ Use start_errand instead when it will take calling around or several tries over 
           goal: { type: 'string', description: 'What the call must get done, in one sentence.' },
           share: { type: 'string', description: 'Exactly what the caller may tell them, with values.' },
           keep_transcript: { type: 'boolean', description: 'True only if the owner asked to keep a word-for-word record.' },
+          personal_ok: { type: 'boolean', description: 'True only when the number is a person in the owner\'s contacts and the owner said in this conversation they are OK getting a call from the assistant.' },
           hours: HOURS_SCHEMA,
         },
         required: ['owner_request', 'name', 'phone', 'number_source', 'goal'],
       },
     },
     handler: async (input, context?: ToolContext) => {
-      const i = input as { owner_request: string; name: string; phone: string; number_source: string; goal: string; share?: string; keep_transcript?: boolean; hours?: unknown };
+      const i = input as { owner_request: string; name: string; phone: string; number_source: string; goal: string; share?: string; keep_transcript?: boolean; personal_ok?: boolean; hours?: unknown };
       const enabled = checkActionsEnabled();
       if (!enabled.ok) return enabled.reason!;
       if (!errandsEnabled() || !isPhoneConfigured()) return 'Phone calling is not set up on this machine.';
@@ -149,7 +150,7 @@ Use start_errand instead when it will take calling around or several tries over 
       }
       const prepared = prepareErrand({
         goal: i.goal, targets: [{ name: i.name, phone: dial, hours: i.hours }], share: i.share ?? '', max_calls: 2,
-        keep_transcript: i.keep_transcript === true,
+        keep_transcript: i.keep_transcript === true, personal_ok: i.personal_ok === true,
       });
       if ('error' in prepared) return `Not calling: ${prepared.error}`;
       const id = startCallNow(prepared.payload as unknown as Parameters<typeof startCallNow>[0], null);
@@ -181,7 +182,9 @@ Use start_errand instead when it will take calling around or several tries over 
         const row = getErrand(id);
         return row ? describeErrand(row, true) : `Errand #${id} not found.`;
       }
-      const rows = listErrands({ open: !include_finished, limit: 10 });
+      // Practice and test calls (silent) are tests, not the owner's errands.
+      const silent = (r: { envelope_json: string }) => { try { return JSON.parse(r.envelope_json).silent === true; } catch { return false; } };
+      const rows = listErrands({ open: !include_finished, limit: 30 }).filter((r) => !silent(r)).slice(0, 10);
       return rows.length ? rows.map((r) => describeErrand(r)).join('\n') : 'No open errands.';
     },
   },

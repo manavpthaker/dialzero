@@ -282,6 +282,25 @@ async function main(): Promise<void> {
     assert.ok((out!.match(/^\d\. /gm) ?? []).length <= 5, 'at most 5 items');
   });
 
+  await test('a text that reaches the owner is saved in their thread, so the assistant knows it said it', async () => {
+    // A voicemail result was texted but not in history, so the assistant
+    // told the owner the call never connected.
+    clear();
+    const prevMode = process.env.COS_ARBITER_MODE;
+    process.env.COS_ARBITER_MODE = 'enforce';
+    db.prepare("DELETE FROM messages WHERE group_id = 'admin'").run();
+    const thread = () => db.prepare("SELECT role, content FROM messages WHERE group_id = 'admin' ORDER BY id").all() as Array<{ role: string; content: string }>;
+
+    await cos.sendInterrupt(req({ kind: 'reply', subject: 'errand:38', text: '📞 Dentist: Left a voicemail.' }));
+    assert.deepEqual(thread().map((m) => m.role), ['assistant']);
+    assert.match(thread()[0].content, /Left a voicemail/);
+
+    await cos.sendInterrupt(req({ kind: 'reply', subject: 'other', text: 'For someone else', target: '+15559998888' }));
+    await cos.sendInterrupt(req({ kind: 'nudge', subject: 'held', text: 'Held for the check-in' }));
+    assert.equal(thread().length, 1, 'texts to others and held texts stay out of their thread');
+    process.env.COS_ARBITER_MODE = prevMode;
+  });
+
   try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* best effort */ }
 
   if (failures.length) {

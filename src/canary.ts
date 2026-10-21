@@ -14,6 +14,8 @@ import { scheduleCron } from './lib/cron.js';
 import { createErrand, getErrand, getErrandEvents, getMemory, setMemory } from './db.js';
 import { sendInterrupt } from './cos-outbound.js';
 import { todayET } from './lib/time-et.js';
+import { lastCallFor } from './call-log.js';
+import { runScene, runScenes, sceneForDay, takeRunRequest, type Grade } from './practice-line.js';
 import { getBotName } from './config.js';
 
 const GROUP = 'canary';
@@ -30,6 +32,13 @@ export function canarySites(raw = process.env.CANARY_SITES || ''): CanarySite[] 
 }
 
 type Result = { ok: boolean; detail: string };
+/**
+ * ok = the phone path works. quiet = the assistant also behaved: said nothing over
+ * the recording (a check can pass while the assistant talks over it, so "passed"
+ * says nothing about how it handles menus and recordings). Talk-over isn't texted;
+ * the weekly scorecard counts it.
+ */
+type CallResult = Result & { quiet?: boolean };
 
 async function alert(kind: 'call' | 'web', text: string): Promise<void> {
   const key = `alerted_${kind}_${todayET()}`;
@@ -38,7 +47,14 @@ async function alert(kind: 'call' | 'web', text: string): Promise<void> {
   await sendInterrupt({ source: 'canary', subject: `canary:${kind}`, kind: 'reply', text });
 }
 
-export async function callCheck(waitMs = 6 * 60_000): Promise<Result> {
+/** What the assistant said on the practice call, from the call log ('' = stayed quiet; null = no log). */
+export function practiceSpeech(errandId: number): string | null {
+  const log = lastCallFor(errandId);
+  if (!log) return null;
+  return (log.transcript ?? '').split('\n').filter((l) => /^\[[\d:]+\] Bot: /.test(l)).map((l) => l.replace(/^\[[\d:]+\] Bot: /, '')).join(' ');
+}
+
+export async function callCheck(waitMs = 6 * 60_000): Promise<CallResult> {
   const id = createErrand({
     action_id: null, deadline: null,
     goal: 'CANARY practice call: hear the current time from the recorded time announcement.',
@@ -54,7 +70,12 @@ export async function callCheck(waitMs = 6 * 60_000): Promise<Result> {
     const row = getErrand(id);
     if (row && row.status !== 'active') {
       const last = getErrandEvents(id, 10).find((e) => e.type === 'call_result' || e.type === 'phone_down' || e.type === 'blocked');
-      return row.status === 'done' ? { ok: true, detail: row.outcome ?? 'done' } : { ok: false, detail: last?.detail ?? row.outcome ?? row.status };
+      if (row.status !== 'done') return { ok: false, detail: last?.detail ?? row.outcome ?? row.status };
+      const said = practiceSpeech(id);
+      if (said === null) return { ok: true, detail: row.outcome ?? 'done' };
+      return said
+        ? { ok: true, quiet: false, detail: `${row.outcome ?? 'done'} | the assistant talked over the recording: "${said.slice(0, 120)}"` }
+        : { ok: true, quiet: true, detail: row.outcome ?? 'done' };
     }
   }
   return { ok: false, detail: 'no result within 6 minutes (the call never started or never ended)' };
@@ -74,16 +95,28 @@ export async function webCheck(dayIndex = Math.floor(Date.now() / 86_400_000)): 
   return { ok: r.status === 'done', detail: r.summary, site: site.name };
 }
 
-export async function runMorningCheck(): Promise<{ call: Result | null; web: (Result & { site: string }) | null }> {
-  const call = process.env.PHONE_PUBLIC_URL
+/** On while the practice line is being proven (PRACTICE_LINE_ENABLED=true): one scene each morning, in turn. */
+const practiceDaily = () => process.env.PRACTICE_LINE_ENABLED === 'true';
+let practiceRunning = false;
+
+async function practice(fn: () => Promise<Grade[]>): Promise<Grade[]> {
+  if (practiceRunning) return [];
+  practiceRunning = true;
+  try { return await fn(); } catch (err) { console.error('[practice] failed:', err); return []; } finally { practiceRunning = false; }
+}
+
+export async function runMorningCheck(): Promise<{ call: CallResult | null; web: (Result & { site: string }) | null; practice?: Grade }> {
+  const call: CallResult | null = process.env.PHONE_PUBLIC_URL
     ? await callCheck().catch((err) => ({ ok: false, detail: `check crashed: ${err instanceof Error ? err.message : err}` }))
     : null;
+  // Practice results go to the weekly scorecard, not to the owner's phone.
+  const scene = call?.ok && practiceDaily() ? (await practice(async () => [await runScene(sceneForDay())]))[0] : undefined;
   const web = await webCheck().catch((err) => ({ ok: false, detail: `check crashed: ${err instanceof Error ? err.message : err}`, site: '?' }));
-  setMemory(GROUP, 'last', JSON.stringify({ at: new Date().toISOString(), call, web }));
-  console.log(`[canary] call ${call ? (call.ok ? 'ok' : 'FAILED') : 'skipped'}: ${call?.detail.slice(0, 160) ?? ''} | web ${web ? `(${web.site}) ${web.ok ? 'ok' : 'FAILED'}: ${web.detail.slice(0, 160)}` : 'skipped (no CANARY_SITES)'}`);
+  setMemory(GROUP, 'last', JSON.stringify({ at: new Date().toISOString(), call, web, practice: scene }));
+  console.log(`[canary] call ${call ? (call.ok ? 'ok' : 'FAILED') : 'skipped'}${call?.quiet === false ? ' (talked over the recording)' : ''}: ${call?.detail.slice(0, 160) ?? ''} | web ${web ? `(${web.site}) ${web.ok ? 'ok' : 'FAILED'}: ${web.detail.slice(0, 160)}` : 'skipped (no CANARY_SITES)'}`);
   if (call && !call.ok) await alert('call', `🔧 Morning check: ${getBotName()}'s practice call didn't work, so business calls may fail today. ${call.detail.replace(/\s+/g, ' ').slice(0, 180)}`);
   if (web && !web.ok) await alert('web', `🔧 Morning check: ${web.site} isn't signed in on the Mac anymore (${web.detail.replace(/\s+/g, ' ').slice(0, 140)}). Sign in there in Chrome when you can.`);
-  return { call, web };
+  return { call, web, practice: scene };
 }
 
 export function startCanary(): void {
@@ -93,6 +126,9 @@ export function startCanary(): void {
   // `npm run canary` sets this flag; the check runs here, in the process that owns
   // the browser bridge and the phone webhooks.
   setInterval(() => {
+    // `npm run practice -- --scene=…|--all` asks for practice scenes the same way.
+    const scenes = takeRunRequest();
+    if (scenes.length) void practice(() => runScenes(scenes));
     if (getMemory(GROUP, 'run_now') !== '1') return;
     setMemory(GROUP, 'run_now', '');
     runMorningCheck().catch((err) => console.error('[canary] failed:', err));

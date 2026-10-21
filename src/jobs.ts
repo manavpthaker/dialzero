@@ -165,11 +165,16 @@ function errandItem(r: ErrandRow): OpenItem {
 let errandLine: ((r: ErrandRow) => string) | null = null;
 export function setErrandLine(fn: (r: ErrandRow) => string): void { errandLine = fn; }
 
+/** A practice or test call (the canary, the practice line, owner test calls): never texts the owner, never in their list. */
+export function isSilentErrand(r: { envelope_json: string }): boolean {
+  try { return (JSON.parse(r.envelope_json) as { silent?: boolean }).silent === true; } catch { return false; }
+}
+
 export function openItems(): OpenItem[] {
   const items = [
     // Practice runs are tests: never in the owner's list, check-ins, or reply context.
     ...listOpenJobRows(30).filter((j) => !j.title.startsWith('Practice:')).map(jobItem),
-    ...listErrands({ open: true, limit: 10 }).map(errandItem),
+    ...listErrands({ open: true, limit: 20 }).filter((r) => !isSilentErrand(r)).slice(0, 10).map(errandItem),
   ];
   const order: Record<ItemStatus, number> = { waiting_on_you: 0, working: 1, watching: 2 };
   return items.sort((a, b) => order[a.status] - order[b.status]);

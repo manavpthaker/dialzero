@@ -32,6 +32,10 @@ import { sendInterrupt } from './cos-outbound.js';
 import {
   lookupCaller, connectDecision, deliverMessage, logConnected, logDeclined, type ReceptionCaller,
 } from './reception.js';
+import { CallTimeline } from './lib/call-timing.js';
+import { ReplyGate } from './lib/reply-gate.js';
+import { applyReview, recordCall, reviewCall, reviewLine, type CallReview, type EndReason } from './call-log.js';
+import { armedScene, isPracticeCall, sceneStep, SCENES, type Scene } from './practice-line.js';
 
 const env = (k: string, d = '') => (process.env[k] ?? d).trim();
 const PORT = Number(env('PHONE_PORT', '4011'));
@@ -62,7 +66,7 @@ const BLOCKED_PREFIXES = ['1911', '1988', '1900', '1976'];
 /** A wake-up call (src/wakeup.ts). `attempt` lets a late result be told apart from the current one. */
 export type WakeCallInfo = { id: number; attempt: number; timeLabel: string; note?: string; firstEvent?: string };
 type OwnerCall = { kind: 'owner'; reason?: string; wake?: WakeCallInfo; twilioSid?: string };
-type ErrandCall = {
+export type ErrandCall = {
   kind: 'errand'; actionId: number; to: string; name: string | null;
   personId: number | null; goal: string; context: string;
   /** Owner chose to keep a word-for-word record of this call. Default: outcome only. */
@@ -83,6 +87,8 @@ type ErrandCall = {
   callback?: boolean;
   /** Callbacks only: what has happened on the errand so far, one line each. */
   history?: string[];
+  /** The daily practice call: logged as practice, kept out of the real numbers. */
+  practice?: boolean;
   /** Someone else called the assistant's number: it acts as the receptionist (src/reception.ts). */
   reception?: {
     caller: ReceptionCaller;
@@ -107,6 +113,10 @@ export interface CallResult {
   booking?: CallBooking;
   /** Who we spoke with and what they said, for the next call to this place. */
   notes?: CallNotes;
+  /** The after-call review of the transcript (src/call-log.ts), when it ran. */
+  review?: CallReview;
+  /** "Review: …; ended: they hung up; reply 1.4s median…", for the errand log. */
+  reviewLine?: string;
 }
 
 export interface CallNotes {
@@ -345,6 +355,8 @@ interface Conf {
   dialTo?: string; bizStarted?: boolean; bizSid?: string; assistantSid?: string;
   /** Set by the live session: the business picked up / never did. */
   onAnswered?: () => void; onNoAnswer?: (status: string) => void; answered?: boolean;
+  /** Their leg ended (they hung up, or the conference closed) while the assistant's session was live. */
+  bizEndedAt?: number;
 }
 const confs = new Map<string, Conf>();
 const rawStepUrl = (step: string, token: string, extra = '') => `${PUBLIC_URL}/twilio/voice?step=${step}&t=${token}${extra}`;
@@ -403,6 +415,7 @@ export async function conferenceStep(step: string, token: string, params: URLSea
     const st = params.get('CallStatus') || '';
     if (st === 'in-progress' && !c.answered) { c.answered = true; c.onAnswered?.(); }
     else if (['no-answer', 'busy', 'failed', 'canceled'].includes(st) || (st === 'completed' && !c.answered)) c.onNoAnswer?.(st || 'no-answer');
+    else if (st === 'completed' && !c.bizEndedAt) c.bizEndedAt = Date.now();
     return empty;
   }
   if (step === 'conf' && params.get('StatusCallbackEvent') === 'participant-join' && !c.sipStarted) {
@@ -790,19 +803,52 @@ const ECHO_TAIL_MS = 1_500;
 /** Rough speaking pace for estimating when the assistant's audio stops playing. */
 const MS_PER_BOT_WORD = 380;
 
-/** The opener rule for outbound errand calls (exported for tests). */
-export function openerRule(bot: string, full: string): string {
-  return `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first. Then ONE short sentence and a question, e.g. "Hi, this is ${bot}, ${full}'s assistant. I'd like to make a reservation for tomorrow, do you have a moment?" Always say you're their assistant ("Hi, this is ${bot}, ${full}'s assistant"); never "calling for ${full}", which sounds like you're looking for them there. Introduce yourself ONCE per call: if they talk over you or say "hello?" again, never restart the intro; say "Hi, yes!" and ask your question in a few words. Never say "thanks for holding" unless they actually put you on hold. Stop and wait for their answer. Then give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone.
-ONE QUESTION PER TURN: ask one thing, then stop talking and wait for their full answer before the next. Never stack questions in one breath (a hotel desk got four questions at once and the call ended with none answered). Sound like a friendly person, not a checklist: react to what they say ("oh perfect, thank you", "got it"), let small talk happen, and work the next question in naturally. If an answer already covers a later question, don't ask it. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`;
+/**
+ * The opener for outbound errand calls (exported for tests). Calls tended to die in
+ * the first seconds because the old rules fought each other ("introduce yourself
+ * once" next to "say 'Hi, yes!' if talked over"), so the assistant restarted and
+ * repeated itself. Now one sentence that says who it is, that it's an AI, that the
+ * line is recorded (when it is), and ends on the question; "introduce once" is
+ * enforced by the call code (afterIntroRule swaps in once it has been said).
+ */
+export function openerRule(bot: string, full: string, recorded: boolean): string {
+  const line = recorded ? ', on a recorded line' : '';
+  return `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first.
+Your first turn is ONE sentence that ends on your question, about 20 words: "Hi, this is ${bot}, ${full}'s AI assistant${line}. <your question>?" For example: "Hi, this is ${bot}, ${full}'s AI assistant${line}. Do you have a table for four tomorrow at 7?" Never "calling for ${full}" (it sounds like you're looking for them there). Then stop talking and wait for their answer. Never say "thanks for holding" unless they actually put you on hold.`;
 }
 
-function errandSessionConfig(call: ErrandCall) {
+/** Once the assistant has introduced itself: never again, only a short repair (exported for tests). */
+export function afterIntroRule(): string {
+  return `You have ALREADY introduced yourself on this call. Never introduce yourself again and never repeat your name or who you work for, even if they say "hello?" again or talk over you. If they didn't catch you, say only a few words about why you're calling ("Sorry, I'm calling about a table for tomorrow night.") and go on.`;
+}
+
+/** How the conversation goes after the opener (exported for tests). */
+export function conversationRule(): string {
+  return `Give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone.
+ONE QUESTION PER TURN: ask one thing, then stop talking and wait for their full answer before the next. Never stack questions in one breath (a hotel desk got four questions at once and the call ended with none answered). Let them finish: if they pause mid-thought, wait for them to go on. Sound like a friendly person, not a checklist: react to what they say ("oh perfect, thank you", "got it"), let small talk happen, and work the next question in naturally. If an answer already covers a later question, don't ask it. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`;
+}
+
+/** The assistant's words introduce it ("this is <name>", "I'm <name>", "AI assistant"). Exported for tests. */
+export function isIntro(said: string, bot = getBotName()): boolean {
+  const b = bot.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const t = said.toLowerCase();
+  return new RegExp(`\\b(this is|i'?m|it'?s|my name is) ${b}\\b`).test(t) || /\bai assistant\b/.test(t);
+}
+
+/** The number a business can call back: PHONE_CALLBACK_NUMBER, else the assistant's own line. */
+export function callbackNumber(): string {
+  return env('PHONE_CALLBACK_NUMBER') || TWILIO_NUMBER;
+}
+
+/** Exported for tests. */
+export function errandSessionConfig(call: ErrandCall, opts: { introduced?: boolean } = {}) {
   if (call.reception) return receptionSessionConfig(call);
   const o = getOwner();
   const owner = o.name;
   const full = o.fullName || o.name;
   const bot = getBotName();
-  const callback = env('PHONE_CALLBACK_NUMBER');
+  const callback = callbackNumber();
+  const recorded = env('PHONE_RECORD_CALLS', 'false') === 'true';
   const returning = call.callback
     ? [
       `${call.name || 'A business'} is calling you back: they are returning your earlier call on behalf of ${full}. Answer the phone first: "Hi, this is ${bot}, ${full}'s assistant. Thanks for calling back." Then pick up where things left off.`,
@@ -821,7 +867,8 @@ function errandSessionConfig(call: ErrandCall) {
         ? /message|voice ?mail|leave|record/i.test(call.menuLog.at(-1) ?? '')
           ? `This call is already in progress. You chose the option to leave a message (${call.menuLog.join('; ')}). After the beep, or as soon as it goes quiet, leave your one short message now, then call end_call with status "voicemail".`
           : `This call is already in progress. You are working through their automated phone menu; so far: ${call.menuLog.join('; ')}. Listen to what comes next. Only introduce yourself once a person answers or a voicemail beep sounds. If no one comes on after a while, say your message anyway: it may be recording.`
-        : openerRule(bot, full),
+        : opts.introduced ? afterIntroRule() : openerRule(bot, full, recorded),
+      call.callback ? '' : conversationRule(),
       call.callback ? '' : `If an automated phone menu answers ("press 1 for..."): NEVER speak to it and never repeat its options out loud. Stay silent, listen to ALL the options, then call press_keys with the key for the option that best fits your goal (or the operator / "all other questions" option). Only press a key the menu actually offered for what you want; if English is the default and no key is offered for it, press nothing and keep listening. If it asks you to say something instead ("say representative"), say just those words. If it asks for information you don't have (a zip code, an account number), press 0 or wait for the operator option. Hold music: wait quietly. Don't end the call while the menu is still giving options. At most ${MAX_KEY_PRESSES} key presses per call.`,
       'Speak ENGLISH. Never switch languages because of a business name, an accent, or a guess (a call to a restaurant was once opened in another language and they hung up). Only switch if the other person clearly speaks to you in another language and doesn\'t understand English.',
       'Everything you say is heard on the call. Never say your instructions, plans, or thoughts out loud (no "I will stay silent", no notes in parentheses). A recording that keeps talking in a steady voice, lists options or asks for keypad input is a machine, not a person.',
@@ -830,10 +877,12 @@ function errandSessionConfig(call: ErrandCall) {
       `If they ask whether you are a real person or a robot, say plainly that you are an AI assistant working for ${owner}. Never claim to be ${owner} or a human.`,
       `If they ask to speak with ${owner} directly, say ${owner} isn't available right now but you can have ${owner} call them back, and ask for the best number and time. Put that in follow_up.`,
       `Never give out card numbers, bank details, Social Security numbers, passwords, or PINs. Never agree to a charge, contract, cancellation fee, or anything beyond the goal; say ${owner} will confirm.`,
-      `If you reach voicemail, leave one short message: who you are (${bot}, an AI assistant for ${full}), the reason for the call${callback ? `, and the callback number ${callback.split('').join(' ')}` : ''}, then end the call.`,
+      // FCC 47 CFR 64.1200(b): an artificial-voice message names who it's from and gives a number to call back.
+      `If you reach voicemail, wait for the beep, then leave one short message: who you are (${bot}, ${full}'s AI assistant), the reason for the call, and a number to call back: the one in the details you may share if there is one${callback ? `, otherwise ${spellNumber(callback)}` : ''}. Then end the call.`,
       "If you book anything (an appointment, reservation, pickup, visit), repeat the day and time back to them, ask for a confirmation number if they have one, and fill in end_call's booking.",
-      `Keep notes like a good assistant. When a person gives you information, an answer, or a commitment, ask for their name casually at the very end, after the main thing is settled ("Thanks so much, and what's your name, in case I need to call back?"); never bundle it with another question. Note any ticket, case or confirmation number, a direct line or extension, and anything they said they'd do and by when. Put all of it in end_call's notes. If the goal mentions earlier calls to this place, refer to them naturally ("Pat mentioned on Monday that…") instead of starting from scratch.`,
+      `Keep notes like a good assistant. When a person gives you information, an answer, or a commitment, ask for their name casually once the main thing is settled and BEFORE you say goodbye ("Thanks so much, and what's your name, in case I need to call back?"); never bundle it with another question. If they already told you their name (e.g. in their greeting: "this is Dana"), don't ask; use it. Note any ticket, case or confirmation number, a direct line or extension, and anything they said they'd do and by when. Put all of it in end_call's notes. If the goal mentions earlier calls to this place, refer to them naturally ("Pat mentioned on Monday that…") instead of starting from scratch.`,
       'When the goal is done or clearly cannot be done, say thank you and goodbye, then call end_call with what happened.',
+      'Once THEY say goodbye ("bye now", "have a good one", "you\'re all set, thanks for calling"), the call is over: say a short goodbye in a few words and call end_call in the same turn. Never start a new question after their goodbye.',
     ].filter(Boolean).join('\n'),
     tools: [...(call.callback ? [] : [{
       type: 'function', name: 'press_keys',
@@ -889,6 +938,12 @@ function errandSessionConfig(call: ErrandCall) {
   };
 }
 
+/** "+1 555 010 2100" read out digit by digit: "5 5 5, 0 1 0, 2 1 0 0". */
+export function spellNumber(e164: string): string {
+  const d = e164.replace(/\D/g, '').slice(-10);
+  return d.length === 10 ? `${d.slice(0, 3).split('').join(' ')}, ${d.slice(3, 6).split('').join(' ')}, ${d.slice(6).split('').join(' ')}` : e164;
+}
+
 async function askAssistant(request: string): Promise<string> {
   const owner = ownerSession();
   if (!owner) return 'I am not set up to look that up right now.';
@@ -928,16 +983,22 @@ function runCall(callId: string, call: PendingCall): void {
   // Someone calling in (the owner, a business calling back) hears us first.
   const inbound = call.kind === 'owner' ? !call.reason : !!(call.callback || call.reception);
   if (call.kind === 'errand' && !call.lineStartedAt) call.lineStartedAt = Date.now();
-  const hangup = (delayMs: number) => {
+  // Why the line ended, from our side; unset means it ended on its own (see finishCall).
+  let endReason: EndReason | '' = '';
+  const timeline = new CallTimeline();
+  let sawAudioBuffer = false;
+  let introduced = false;
+  const hangup = (delayMs: number, why: EndReason = 'bot_end_call') => {
     if (ended) return;
     ended = true;
+    endReason ||= why;
     setTimeout(() => callApi(callId, 'hangup').catch((e) => console.warn('[phone] hangup:', e.message)), delayMs);
   };
   const elapsed = call.kind === 'errand' && call.lineStartedAt ? Date.now() - call.lineStartedAt : 0;
   const wake = call.kind === 'owner' ? call.wake : undefined;
   // A receptionist call is short; a robocaller shouldn't run the meter for 15 minutes.
   const maxMs = wake ? WAKE_MAX_CALL_MS : call.kind === 'errand' && call.reception ? 5 * 60_000 : MAX_CALL_MS;
-  const cap = setTimeout(() => { console.warn(`[phone] ${callId} hit max length`); hangup(0); }, Math.max(30_000, maxMs - elapsed));
+  const cap = setTimeout(() => { console.warn(`[phone] ${callId} hit max length`); hangup(0, 'max_length'); }, Math.max(30_000, maxMs - elapsed));
   // Wake-up calls: real spoken owner answers, and whether the model asked to confirm.
   let wakeAnswers = 0;
   let wakeConfirmAsked = false;
@@ -976,7 +1037,7 @@ function runCall(callId: string, call: PendingCall): void {
     if (call.kind !== 'errand' || inbound) return;
     speakFirst = setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, speakMs);
     deadAir = setTimeout(() => {
-      if (!botSpoke && !ended) { console.warn(`[phone] ${callId}: nothing happened on the line, hanging up`); hangup(0); }
+      if (!botSpoke && !ended) { console.warn(`[phone] ${callId}: nothing happened on the line, hanging up`); hangup(0, 'dead_air'); }
     }, onMenu ? 120_000 : 75_000);
   };
   // The assistant calling the owner (not a wake-up): two "call me" calls were silent both
@@ -996,18 +1057,18 @@ function runCall(callId: string, call: PendingCall): void {
       if (heardOwner || ended) return;
       console.warn(`[phone] ${callId}: owner call, nothing heard from them in ${OWNER_DEAD_AIR_MS / 1000}s, hanging up`);
       tellOwnerCallFailed(callId, `📞 I called but the line was silent, so I hung up. Reply "call me" to try again.`);
-      hangup(0);
+      hangup(0, 'dead_air');
     }, OWNER_DEAD_AIR_MS);
   }
   if (waitForAnswer && firstConf) {
     // They pick up and say hello into a line the assistant is already on: let VAD take their
     // greeting, and speak first after a short pause if they don't say anything.
-    firstConf.onAnswered = () => { console.log(`[phone] ${callId}: they picked up`); startTimers(PICKUP_SPEAK_MS); };
+    firstConf.onAnswered = () => { console.log(`[phone] ${callId}: they picked up`); timeline.pickedUp(); startTimers(PICKUP_SPEAK_MS); };
     firstConf.onNoAnswer = (st) => {
       if (ended) return;
       console.log(`[phone] ${callId}: business ${st}`);
       if (!status) { status = 'retry_later'; outcome = st === 'busy' ? 'Line was busy.' : 'No one picked up.'; }
-      hangup(0);
+      hangup(0, st === 'busy' ? 'busy' : st === 'failed' ? 'failed' : 'no_answer');
     };
     if (firstConf.answered) firstConf.onAnswered();
   } else {
@@ -1031,6 +1092,8 @@ function runCall(callId: string, call: PendingCall): void {
     if (talking) { respondAfterDone = true; return; }
     send({ type: 'response.create' });
   };
+  // A finished turn waits a beat, and the assistant holds back if they keep talking (src/lib/reply-gate.ts).
+  const gate = new ReplyGate(respond, Number(env('PHONE_YIELD_MS', '700')));
   const settle = (itemId: string, echo: boolean) => {
     const t = waiting.get(itemId);
     if (!t) return;
@@ -1040,7 +1103,7 @@ function runCall(callId: string, call: PendingCall): void {
       echoes++;
       echoIds.add(itemId);
       send({ type: 'conversation.item.delete', item_id: itemId });
-    } else respond();
+    } else gate.turnEnded();
   };
   const onEchoGuardEvent = (ev: Record<string, any>) => {
     const now = Date.now();
@@ -1055,9 +1118,10 @@ function runCall(callId: string, call: PendingCall): void {
       if (respondAfterDone) { respondAfterDone = false; setTimeout(() => respond(), 0); }
     } else if (ev.type === 'input_audio_buffer.speech_started' && ev.item_id) {
       if (now < botEndsAt + ECHO_TAIL_MS) suspect.add(String(ev.item_id));
+      else gate.theyStarted();
     } else if (ev.type === 'input_audio_buffer.committed' && ev.item_id) {
       const id = String(ev.item_id);
-      if (!suspect.has(id)) { respond(); return; }
+      if (!suspect.has(id)) { gate.turnEnded(); return; }
       // No transcript in time: treat it as them, as before.
       waiting.set(id, setTimeout(() => settle(id, false), 2_500));
     } else if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.item_id && suspect.has(String(ev.item_id))) {
@@ -1102,6 +1166,13 @@ function runCall(callId: string, call: PendingCall): void {
       console.warn(`[phone] reception ${ev.type}: ${JSON.stringify(ev.error ?? ev).slice(0, 300)}`);
     }
     if (echoGuard) onEchoGuardEvent(ev);
+    // Timing: the audio-buffer events say when the assistant's voice actually plays on the line;
+    // until one is seen, response.created/done stand in (a little early).
+    if (String(ev.type).startsWith('output_audio_buffer.') && !sawAudioBuffer) { sawAudioBuffer = true; timeline.timedByAudio = true; }
+    if (ev.type === 'input_audio_buffer.speech_started') timeline.theyStarted();
+    else if (ev.type === 'input_audio_buffer.speech_stopped') timeline.theyStopped();
+    else if (ev.type === 'output_audio_buffer.started' || (!sawAudioBuffer && ev.type === 'response.created')) timeline.botStarted();
+    else if (ev.type === 'output_audio_buffer.stopped' || (!sawAudioBuffer && ev.type === 'response.done')) timeline.botStopped();
     if (ev.type === 'response.done') talking = false;
     if (ev.type === 'conversation.item.input_audio_transcription.completed') {
       // Sound over the assistant that came to no words was noise, not the other side.
@@ -1113,6 +1184,7 @@ function runCall(callId: string, call: PendingCall): void {
     } else if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
       heardOwner = true;
       transcript.push(`${call.kind === 'owner' ? 'You' : 'Them'}: ${String(ev.transcript).trim()}`);
+      timeline.line('Them', String(ev.transcript));
       if (wake && isRealWakeAnswer(String(ev.transcript))) wakeAnswers++;
     } else if (ev.type === 'response.created' || ev.type === 'input_audio_buffer.speech_started') {
       if (ev.type === 'input_audio_buffer.speech_started') {
@@ -1125,6 +1197,13 @@ function runCall(callId: string, call: PendingCall): void {
     } else if (ev.type === 'response.output_audio_transcript.done' && ev.transcript) {
       botSpoke = true;
       transcript.push(`Bot: ${String(ev.transcript).trim()}`);
+      timeline.line('Bot', String(ev.transcript));
+      // Introduce once, enforced here: once it has said who it is, the opener rule is
+      // replaced by "never again, a short repair at most" for the rest of the call.
+      if (call.kind === 'errand' && !call.reception && !introduced && isIntro(String(ev.transcript))) {
+        introduced = true;
+        send({ type: 'session.update', session: { type: 'realtime', instructions: errandSessionConfig(call, { introduced: true }).instructions } });
+      }
     } else if (ev.type === 'response.function_call_arguments.done') {
       let args: Record<string, unknown> = {};
       try { args = JSON.parse(ev.arguments || '{}'); } catch { /* empty args */ }
@@ -1216,6 +1295,8 @@ function runCall(callId: string, call: PendingCall): void {
     if (overTalk) console.log(`[phone] ${callId}: sound over the assistant ${overTalk}x, ${noiseOverTalk} of them no words (noise)`);
     for (const t of waiting.values()) clearTimeout(t);
     if (echoes) console.log(`[phone] ${callId}: dropped ${echoes} echo turn(s) of the assistant's own voice`);
+    gate.cancel();
+    if (gate.yields) console.log(`[phone] ${callId}: held back ${gate.yields}x while they kept talking`);
     if (handedOff) {
       console.log(`[phone] ${callId} handed off to the next menu step`);
       return;
@@ -1227,7 +1308,8 @@ function runCall(callId: string, call: PendingCall): void {
     if (wake) {
       try { wakeHooks?.onFinished(wake.id, wake.attempt, { awake: isAwake(), answers: wakeAnswers }); } catch (err) { console.error('[phone] wake hook failed:', err); }
     }
-    finishCall(callId, call, transcript, outcome, followUp, status, booking, notes, receptionMessage).catch((err) => console.error('[phone] wrap-up failed:', err));
+    const lineEnd = { timeline, echoes, endReasonOf: (): EndReason => endReason || (firstConf?.bizEndedAt ? 'they_hung_up' : 'line_dropped') };
+    finishCall(callId, call, transcript, outcome, followUp, status, booking, notes, receptionMessage, lineEnd).catch((err) => console.error('[phone] wrap-up failed:', err));
   });
 }
 
@@ -1250,7 +1332,9 @@ async function finishCall(
   booking?: CallBooking,
   notes?: CallNotes,
   receptionMessage?: { callerName: string; callback: string; reason: string; urgent: boolean },
+  lineEnd?: { timeline: CallTimeline; echoes: number; endReasonOf: () => EndReason },
 ): Promise<void> {
+  const closedAt = Date.now();
   if (call.kind === 'errand' && call.reception) {
     // Reception calls never reach errands or the one-off path.
     const r = call.reception;
@@ -1288,7 +1372,7 @@ async function finishCall(
     } catch { /* people-graph writes never fail a call */ }
   }
   const spoke = transcript.length > 0;
-  const result: CallResult = {
+  let result: CallResult = {
     // No end_call means the line dropped or nothing engaged (a phone menu, hold
     // music, silence): worth another try. Only the call AI can declare "failed".
     status: status || 'retry_later',
@@ -1301,6 +1385,7 @@ async function finishCall(
     ...(booking ? { booking } : {}),
     ...(notes ? { notes } : {}),
   };
+  if (lineEnd) result = await reviewAndLog(callId, call, result, status, lineEnd, closedAt);
   if (call.callback) {
     if (call.errandId && errandHooks?.onCallback) errandHooks.onCallback(call.errandId, call.name || call.to, result);
     return;
@@ -1317,6 +1402,41 @@ async function finishCall(
   if (tail) lines.push(`\n${tail}`);
   lines.push(`(action #${call.actionId})`);
   await sendInterrupt({ source: 'phone', subject: `call:${call.actionId}`, kind: 'reply', text: lines.join('\n') });
+}
+
+/**
+ * Call review: read the whole timed transcript in a separate step, fold what it
+ * learned into the result, and keep the call in call_log with who ended it, reply
+ * delays and talk-over. Never fails the call's wrap-up.
+ */
+async function reviewAndLog(
+  callId: string, call: ErrandCall & { twilioSid?: string }, result: CallResult, botStatus: CallStatus | '',
+  lineEnd: { timeline: CallTimeline; echoes: number; endReasonOf: () => EndReason }, closedAt: number,
+): Promise<CallResult> {
+  try {
+    // Their hang-up arrives as a Twilio status callback a moment after the line drops.
+    if (!botStatus) await new Promise((r) => setTimeout(r, 1_500));
+    const endReason = lineEnd.endReasonOf();
+    const transcript = lineEnd.timeline.text();
+    const review = await reviewCall({
+      goal: call.goal, target: call.name || call.to, transcript, menuLog: call.menuLog ?? [],
+      endReason, botStatus, botOutcome: botStatus ? result.outcome : '',
+    });
+    const timing = lineEnd.timeline.stats();
+    const reviewed = { ...applyReview(result, review), reviewLine: reviewLine(review, endReason, timing) };
+    const conf = call.conf ? confs.get(call.conf.token) : undefined;
+    recordCall({
+      callId, errandId: call.errandId, actionId: call.actionId || undefined, target: call.name || call.to, phone: call.to,
+      practice: !!call.practice, durationS: Math.max(0, (closedAt - lineEnd.timeline.startedAt()) / 1000),
+      endReason, botStatus, review, timing, echoes: lineEnd.echoes, menuLog: call.menuLog ?? [],
+      transcript, keep: call.keepTranscript, conferenceSid: conf?.sid, twilioSid: conf?.bizSid ?? call.twilioSid,
+    });
+    console.log(`[phone] ${callId}: ${reviewed.reviewLine}`);
+    return reviewed;
+  } catch (err) {
+    console.error('[phone] call review/log failed:', err);
+    return result;
+  }
 }
 
 /** A text to the assistant's Twilio number, passed on to the owner (2026-10-08). Rides /twilio/voice?step=sms
@@ -1381,7 +1501,11 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
   // owner talking. Like business calls, the assistant now finishes its (short) turn; noise
   // reduction for speakerphone. PHONE_OWNER_BARGE_IN=true puts interruptions back.
   const ownerBargeIn = env('PHONE_OWNER_BARGE_IN', 'false') === 'true';
-  const noise = call.kind === 'owner' ? env('PHONE_OWNER_NOISE_REDUCTION', 'far_field') : '';
+  // Business calls get noise reduction too (call review step 3): a phone handset is
+  // near-field audio; line hiss and hold music were being heard as turns.
+  const noiseSetting = call.kind === 'owner' ? env('PHONE_OWNER_NOISE_REDUCTION', 'far_field') : !call.reception ? env('PHONE_NOISE_REDUCTION', 'near_field') : '';
+  const noise = noiseSetting === 'off' ? '' : noiseSetting;
+  const eagerness = env('PHONE_TURN_EAGERNESS', 'low');
   const acceptBody = (language: string, extras = true) => ({
     type: 'realtime',
     model: MODEL,
@@ -1402,7 +1526,7 @@ async function handleOpenAiWebhook(req: IncomingMessage, body: string): Promise<
         turn_detection: call.kind === 'errand' && call.reception
           ? { type: 'server_vad', silence_duration_ms: 600 }
           : call.kind === 'errand' && env('PHONE_BARGE_IN', 'false') !== 'true'
-            ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false, ...(echoGuardOn(call) ? { create_response: false } : {}) }
+            ? { type: 'semantic_vad', eagerness, interrupt_response: false, ...(echoGuardOn(call) ? { create_response: false } : {}) }
             : call.kind === 'owner' && !ownerBargeIn
               ? { type: 'semantic_vad', eagerness: 'low', interrupt_response: false }
               : { type: 'semantic_vad' },
@@ -1513,7 +1637,7 @@ export function preparePlaceCall(p: Record<string, unknown>): Prepared {
     summary: [
       `📞 ${name || 'Call'} ${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}: ${goal}`,
       context ? `Shares: ${context}` : '',
-      keepTranscript ? 'Keeping a transcript' : 'No transcript ("keep transcript" to record)',
+      keepTranscript ? 'Keeping a transcript' : 'Transcript kept 30 days for call review ("keep transcript" keeps it)',
     ].filter(Boolean).join('\n'),
   };
 }
@@ -1537,6 +1661,7 @@ export async function runPlaceCall(action: Action): Promise<{ outcome: string; a
 /** Dial one errand step. The result comes back through setErrandCallHooks. */
 export async function placeErrandCall(c: {
   errandId: number; actionId: number; to: string; name: string | null; goal: string; context: string; keepTranscript: boolean;
+  practice?: boolean;
 }): Promise<string> {
   if (!isPhoneConfigured()) throw new Error('phone calling is not configured');
   const to = toDialable(c.to);
@@ -1544,6 +1669,7 @@ export async function placeErrandCall(c: {
   const nonce = mintNonce({
     kind: 'errand', actionId: c.actionId, to, goal: c.goal, context: c.context,
     name: c.name, personId: null, keepTranscript: c.keepTranscript, errandId: c.errandId,
+    ...(c.practice ? { practice: true } : {}),
   });
   const entry = pending.get(nonce);
   if (assistantFirstMode() && entry && entry.kind === 'errand') {
@@ -1625,6 +1751,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       res.writeHead(200, { 'Content-Type': 'text/xml' }).end('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
       return;
     }
+    // The practice line (src/practice-line.ts): the assistant calling a scripted business.
+    if (step === 'practice' || (!step && isPracticeCall(params))) {
+      if (!twilioSignatureOk(req, params)) throw Object.assign(new Error('bad twilio signature'), { status: 403 });
+      res.writeHead(200, { 'Content-Type': 'text/xml' }).end(practiceTwiml(query, params));
+      return;
+    }
     if (step) {
       if (!twilioSignatureOk(req, params)) throw Object.assign(new Error('bad twilio signature'), { status: 403 });
       const allParams = new URLSearchParams([...params, ...query]);
@@ -1645,6 +1777,23 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
   res.writeHead(404).end();
+}
+
+/** One step of a practice scene; nothing plays unless a practice call is armed. */
+function practiceTwiml(query: URLSearchParams, params: URLSearchParams): string {
+  const armed = armedScene();
+  const asked = query.get('scene') as Scene | null;
+  const scene = asked && (SCENES as string[]).includes(asked) ? asked : armed;
+  if (!armed || !scene) return '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+  const step = sceneStep(scene, query.get('p') || '', new URLSearchParams([...params, ...query]), `${PUBLIC_URL}/twilio/voice`);
+  const sid = params.get('CallSid') || '';
+  if (step.redirect && sid) {
+    const { ms, step: url } = step.redirect;
+    setTimeout(() => {
+      twilioPost(`Calls/${sid}.json`, { Url: url, Method: 'POST' }).catch((err) => console.warn('[phone] practice redirect:', err.message));
+    }, ms).unref();
+  }
+  return step.twiml;
 }
 
 export function startPhone(): void {
