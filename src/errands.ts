@@ -589,7 +589,9 @@ export async function processErrand(id: number): Promise<void> {
       return;
     }
     // The cap stops a runaway loop (the per-number and per-errand limits are what keep any one business from being pestered).
-    if (countErrandCallsToday() >= DAILY_CALL_CAP()) {
+    const silentCall = !!env.silent;
+    const cap = silentCall ? Number(process.env.PRACTICE_DAILY_CALL_CAP || 40) : DAILY_CALL_CAP();
+    if (countErrandCallsToday({ silent: silentCall }) >= cap) {
       // Try again tomorrow morning; the cap protects against a runaway loop.
       updateErrand(id, { next_check_at: sqlTime(nextCallingTime(new Date(Date.now() + 12 * 3600_000))) });
       return;
@@ -639,7 +641,7 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
   const env = envelopeOf(row);
   const target = env.targets[row.target_idx];
   // The checker: "done" has to be backed by what was actually said on the call.
-  if (result.status === 'done') {
+  if (result.status === 'done' && !result.handedToOwner) {
     const b = result.booking;
     const v = await checkDone({
       kind: 'call', goal: row.goal, claim: result.outcome,
@@ -675,7 +677,7 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
   // (often a voicemail cutting off). Say what was said instead of quietly
   // retrying tomorrow; a reply like "try again" resumes it.
   // A review that found a voicemail was left goes on to the voicemail case below.
-  if (env.reply_mode && result.endedWithoutOutcome && result.botSaid && result.review?.verdict !== 'voicemail_left') {
+  if (env.reply_mode && result.endedWithoutOutcome && result.botSaid && result.review?.verdict !== 'voicemail_left' && result.review?.verdict !== 'hung_up') {
     block(fresh, 'The line ended before the call wrapped up.');
     // The after-call review read the whole call, so say what it found rather than guess.
     const what = result.review
@@ -701,7 +703,16 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
     case 'retry_later':
     case 'voicemail': {
       // A definite "can't do it here", or out of tries on this number: move on.
-      // A voicemail left on a one-off call is as far as that call can go.
+      // A voicemail left on a one-off call is as far as that call can go. With other
+      // places still on the list (a message at the first place used to end the errand
+      // before the others were tried), tell the owner and go on to the next one.
+      const othersLeft = fresh.target_idx + 1 < env.targets.length && fresh.calls_made < env.max_calls;
+      if (result.status === 'voicemail' && env.reply_mode && othersLeft) {
+        await progressUpdate(fresh, `${target.name}: left a voicemail. Trying ${env.targets[fresh.target_idx + 1].name} next.`, true);
+        updateErrand(id, { target_idx: fresh.target_idx + 1, next_check_at: sqlTime(new Date(Date.now() + 60_000)) });
+        later(61_000, () => { void processErrand(id); });
+        return;
+      }
       if (result.status === 'voicemail' && env.reply_mode) {
         finish(fresh, 'done', result.outcome);
         await tellOwner(fresh, 'done', `${result.outcome}${result.followUp ? ` ${result.followUp}` : ''}`);

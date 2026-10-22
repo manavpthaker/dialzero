@@ -49,7 +49,7 @@ try {
   await check('scenes: each opens the way a business would', () => {
     assert.match(step('hello').twiml, /<Say[^>]*>Hello\?<\/Say><Gather input="speech"/);
     assert.match(step('greeting').twiml, /this is Dana speaking\. How can I help you today\?<\/Say><Gather/);
-    assert.match(step('menu').twiml, /<Gather input="dtmf" numDigits="1"[^>]*><Say[^>]*>Thank you for calling A B C Roofing\. For sales, press 1/);
+    assert.match(step('menu').twiml, /<Gather input="dtmf" numDigits="1"[^>]*><Say[^>]*>Thank you for calling A B C Roofing\. For billing, press 1\. For our hours and address, press 2\. To schedule an inspection or speak with someone, press 0\./, 'only 0 fits the goal ("1 for sales" would be a fair pick for an inspection)');
     const hold = step('hold');
     assert.match(hold.twiml, /Please hold\.<\/Say><Play loop="0">/);
     assert.equal(hold.redirect?.ms, pl.HOLD_MS);
@@ -161,6 +161,18 @@ try {
     assert.ok(keys.includes(`errand:${real}`));
     assert.ok(!keys.includes(`errand:${silent}`));
     assert.equal(jobs.isSilentErrand({ envelope_json: 'not json' }), false);
+  });
+
+  await check('practice calls have their own daily cap', async () => {
+    const db = await import('../src/db.js');
+    const real = db.createErrand({ action_id: null, goal: 'Book an oil change', deadline: null, envelope_json: JSON.stringify({ goal: 'x', targets: [] }) });
+    const practice = db.createErrand({ action_id: null, goal: 'PRACTICE x', deadline: null, envelope_json: JSON.stringify({ goal: 'x', targets: [], silent: true }) });
+    const before = { real: db.countErrandCallsToday(), silent: db.countErrandCallsToday({ silent: true }) };
+    db.addErrandEvent(practice, 'dialing', '[t0] practice');
+    db.addErrandEvent(practice, 'dialing', '[t0] practice');
+    db.addErrandEvent(real, 'dialing', '[t0] real');
+    assert.equal(db.countErrandCallsToday() - before.real, 1, 'practice dials never use up real calls');
+    assert.equal(db.countErrandCallsToday({ silent: true }) - before.silent, 2);
   });
 
   await check('run requests: queued by the script, taken once by the bot', () => {

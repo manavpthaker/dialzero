@@ -119,7 +119,7 @@ export function sceneStep(scene: Scene, step: string, params: URLSearchParams, b
       }
       const tries = params.get('tries') ? '&tries=1' : '';
       return {
-        twiml: doc(`<Gather input="dtmf" numDigits="1" timeout="10" actionOnEmptyResult="true" action="${url('choice', tries)}">${say('Thank you for calling A B C Roofing. For sales, press 1. For billing, press 2. To speak with the operator, press 0.')}</Gather>`),
+        twiml: doc(`<Gather input="dtmf" numDigits="1" timeout="10" actionOnEmptyResult="true" action="${url('choice', tries)}">${say('Thank you for calling A B C Roofing. For billing, press 1. For our hours and address, press 2. To schedule an inspection or speak with someone, press 0.')}</Gather>`),
       };
     }
     case 'hold':
@@ -194,7 +194,7 @@ export function gradeScene(scene: Scene, row: CallLogRow | null): Grade {
       if (row.bot_status !== 'voicemail' && row.verdict !== 'voicemail_left') problems.push(`ended as "${row.bot_status ?? row.verdict ?? 'nothing'}", not a voicemail`);
     } else {
       if (!them.some((l) => /you're all set|you are all set/i.test(l.text))) problems.push("didn't get to \"you're all set\"");
-      if (row.bot_status !== 'done') problems.push(`ended as "${row.bot_status ?? row.end_reason}", not done`);
+      if (row.bot_status !== 'done' && !(row.goal_met === 1 && row.end_reason === 'they_hung_up')) problems.push(`ended as "${row.bot_status ?? row.end_reason}", not done`);
     }
   }
   const timing = row.median_reply_ms !== null ? `reply ${(row.median_reply_ms / 1000).toFixed(1)}s median` : '';

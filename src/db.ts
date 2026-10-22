@@ -4647,10 +4647,16 @@ export function callNotesFor(opts: { phone?: string | null; business?: string | 
 }
 
 /** Errand calls placed today (local), across all errands, for the daily cap. */
-export function countErrandCallsToday(): number {
+/**
+ * Errand calls placed today, for the daily cap. Practice and test calls (silent
+ * errands) count only toward their own cap (`silent: true`), so a day of practice
+ * runs can't use up the real calls.
+ */
+export function countErrandCallsToday(opts: { silent?: boolean } = {}): number {
+  const which = `errand_id IN (SELECT id FROM errands WHERE COALESCE(json_extract(envelope_json, '$.silent'), 0) ${opts.silent ? '=' : '!='} 1)`;
   const row = db.prepare(
-    `SELECT (SELECT COUNT(*) FROM errand_events WHERE type = 'dialing' AND at >= ?)
-          - (SELECT COUNT(*) FROM errand_events WHERE type = 'phone_down' AND at >= ?) AS n`
+    `SELECT (SELECT COUNT(*) FROM errand_events WHERE type = 'dialing' AND at >= ? AND ${which})
+          - (SELECT COUNT(*) FROM errand_events WHERE type = 'phone_down' AND at >= ? AND ${which}) AS n`
   ).get(toSqliteDate(startOfTodayET()), toSqliteDate(startOfTodayET())) as { n: number };
   // Dials that never reached anyone because our own phone link was down don't count.
   return Math.max(0, row.n);

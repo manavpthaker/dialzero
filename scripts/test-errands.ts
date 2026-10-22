@@ -338,6 +338,32 @@ try {
     assert.match(errands.addErrandNote(id, 'try again'), /back on/);
   });
 
+  await check('an owner-asked voicemail with other places left goes on to the next one', async () => {
+    const p = errands.prepareErrand({ ...base, max_calls: 4 });
+    if ('error' in p) throw new Error(p.error);
+    const id = db.createErrand({ action_id: null, goal: 'x', deadline: null, envelope_json: JSON.stringify({ ...p.payload, reply_mode: true }) });
+    db.addErrandEvent(id, 'dialing', '[t0] test, action #0');
+    await errands.applyCallResult(id, { status: 'voicemail', outcome: 'Left a message.', followUp: '', transcriptTail: '' });
+    const row = db.getErrand(id)!;
+    assert.equal(row.status, 'active');
+    assert.equal(row.target_idx, 1);
+  });
+
+  await check('a hang-up on the intro moves the errand on to the next number', async () => {
+    const { applyReview } = await import('../src/call-log.js');
+    const p = errands.prepareErrand({ ...base, max_calls: 4 });
+    if ('error' in p) throw new Error(p.error);
+    const id = db.createErrand({ action_id: null, goal: 'x', deadline: null, envelope_json: JSON.stringify({ ...p.payload, reply_mode: true }) });
+    db.addErrandEvent(id, 'dialing', '[t0] test, action #0');
+    await errands.applyCallResult(id, applyReview(
+      { status: 'retry_later', outcome: 'The call ended without a recorded outcome.', followUp: '', transcriptTail: '', botSaid: 'Hi, this is the assistant.', endedWithoutOutcome: true },
+      { answeredBy: 'person', goalMet: false, verdict: 'hung_up', summary: 'They hung up after the intro.', learned: 'Only said hello.', nextStep: '' },
+    ));
+    const row = db.getErrand(id)!;
+    assert.equal(row.status, 'active', 'not waiting on the owner');
+    assert.equal(row.target_idx, 1, 'on to the backup');
+  });
+
   await check('a dropped call says what the after-call review found, and a left voicemail is done', async () => {
     const { applyReview } = await import('../src/call-log.js');
     const p = errands.prepareErrand({ ...base, targets: [base.targets[0]], max_calls: 2 });

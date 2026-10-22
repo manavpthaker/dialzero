@@ -113,6 +113,7 @@ Your personal files (`.env`, `config/profile.json`, your own `context/` files an
 | "Tell Sam I'm running 10 late" | Texts Sam for you, as you. |
 | "Email the landlord about the leak" | Writes and sends the email from your Gmail. |
 | "Call the dentist and move my cleaning to next week" | Phones them, handles the menu, talks to the front desk, texts you the result, and puts the new time on your calendar. It notes who it spoke with and any reference number, and uses that on the next call. If the menu only leads to voicemail, it leaves the message. If it can't get through, it tells you exactly where it got stuck. While it works it sends a short update now and then (never a barrage) and tells you the real time of the next call. |
+| (a business asks something only you know) | Texts you the question while the call stays open and tells them your answer; if they ask for you, it rings you into the call and hands over. It speaks only to a person or after the voicemail beep, and works phone menus and hold on its own. |
 | "Cancel my gym membership" | Does it on their website in your signed-in Chrome, turning down every offer to stay, or calls them if it has to. It keeps at it until it's done and texts you the result. It signs in with logins you've saved for it in 1Password (optional; it never sees the password) and picks up texted or emailed codes on its own. It never pays, and if they want something only you have, it asks you once, not every five minutes. |
 | "Book a table for 4 Saturday at 7" | Books it online (never enters a card), or calls if it can't (only while they're open). |
 | (a website job hits a login it can't do) | Texts you a one-time link that opens this Mac's screen in your phone's browser; do the step, tap Done, and the job carries on (optional). Changed your mind mid-job ("make it 7:30")? Just say so. |
@@ -135,6 +136,7 @@ Your personal files (`.env`, `config/profile.json`, your own `context/` files an
 | "Put the grocery list on Instacart" | Fills your Instacart cart in Chrome from the shared grocery list and stops before checkout. |
 | A voice memo | Transcribes it and files away what matters. |
 | "What did I tell Alex at lunch?" | If you use [Omi](https://omi.me) to record your conversations, it looks it up, and quietly keeps the promises, to-dos and people from each one (optional). |
+| (nothing, you're busy) | Optional, when Messages uses your own Apple ID: keeps a short list of texts you still owe a reply to, things you promised, and plans you agreed to, and drops each one once you've replied. |
 | "How did I do in that call?" | With Omi: how much you talked vs listened, questions, fillers, and 2-3 "you said X, try Y" moments; long work calls get a short debrief, and Sunday's check-in compares the week. |
 
 Plus a shared **family chat**: add it to a group text with your partner and it keeps a shared calendar (including repeating events and flyers from a photo) and grocery list, researches plans, and can ask you to OK a call, booking or website job they need done.

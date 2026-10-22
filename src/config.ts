@@ -52,6 +52,10 @@ export interface ProfileUser {
 /** A person in the CRM seed (inner circle). Not necessarily a messaging user. */
 export interface ProfilePerson {
   name: string;
+  /** The name on their contact record ("Alex Rivera"), so recordings land on one person. */
+  fullName?: string;
+  /** Nicknames and the ways transcription mishears them. */
+  aliases?: string[];
   relationship?: string;
   role?: string;
   notes?: string;

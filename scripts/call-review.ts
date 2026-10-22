@@ -44,6 +44,7 @@ for (const r of [...rows].reverse()) {
   if (r.learned) console.log(`  Learned: ${r.learned}`);
   if (r.next_step) console.log(`  Next: ${r.next_step}`);
   if (r.menu) console.log(`  Menu: ${r.menu}`);
+  if (r.stages) console.log(`  Stages: ${r.stages}`);
   if (id) console.log(`\n${r.transcript ?? '(transcript cleared after 30 days)'}`);
   if (withRecordings) for (const line of await recordings(r)) console.log(`  Recording: ${line}`);
   console.log('');

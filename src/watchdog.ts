@@ -8,6 +8,9 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { existsSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import dbh, { getMemory, setMemory } from './db.js';
 import { sendInterrupt } from './cos-outbound.js';
 import { todayET } from './lib/time-et.js';
@@ -64,9 +67,28 @@ function aiCheck(): Check {
   } catch (err) { return { name: 'ai service', status: 'ok', detail: `not checked (${(err as Error).message})` }; }
 }
 
-export async function watchdogChecks(): Promise<Check[]> {
+/**
+ * The doctor's checks, run in a child process when the built file is there: they shell
+ * out with execSync (git, curl, op…), and in-process every 10 minutes that froze the bot
+ * for 1.5–3s, long enough to stall a live call (seen with the stall watch). Under tsx
+ * (tests, scripts) there's no built file, so they run in-process as before.
+ */
+async function doctorChecks(): Promise<Check[]> {
+  const built = fileURLToPath(new URL('./doctor-json.js', import.meta.url));
+  if (existsSync(built)) {
+    try {
+      const { stdout } = await run(process.execPath, [built], { timeout: 30_000, maxBuffer: 4 * 1024 * 1024, cwd: dirname(dirname(built)) });
+      return (JSON.parse(stdout) as { checks: Check[] }).checks;
+    } catch (err) {
+      return [{ name: 'doctor', status: 'warn', detail: `health check didn't run (${(err as Error).message.slice(0, 120)})` }];
+    }
+  }
   const { runHealthCheck } = await import('./doctor.js');
-  const doc = runHealthCheck().checks.filter((c) => fixFor(c.name));
+  return runHealthCheck().checks;
+}
+
+export async function watchdogChecks(): Promise<Check[]> {
+  const doc = (await doctorChecks()).filter((c) => fixFor(c.name));
   const live = await Promise.all([diskCheck(), phoneLinkCheck()]);
   return [...doc, ...live.filter((c): c is Check => !!c), aiCheck()];
 }
@@ -100,9 +122,20 @@ export async function watchdogTick(send: Send = defaultSend, now = Date.now(), c
   return sent;
 }
 
+/** A business call is live: the watchdog's checks wait for the next tick. */
+function callLive(): boolean {
+  try {
+    const db = dbh as unknown as { prepare: (s: string) => { get: () => unknown } };
+    return ((db.prepare("SELECT COUNT(*) c FROM errands WHERE call_state IS NOT NULL AND call_started_at > datetime('now', '-20 minutes')").get() as { c: number }).c) > 0;
+  } catch { return false; }
+}
+
 export function startWatchdog(): void {
   if (process.env.WATCHDOG_ENABLED === 'false') return;
   const every = Number(process.env.WATCHDOG_INTERVAL_MS || 10 * 60_000);
-  setInterval(() => { watchdogTick().catch((err) => console.error('[watchdog] tick failed:', err)); }, every);
+  setInterval(() => {
+    if (callLive()) return;
+    watchdogTick().catch((err) => console.error('[watchdog] tick failed:', err));
+  }, every);
   console.log(`[watchdog] every ${Math.round(every / 60_000)} min`);
 }

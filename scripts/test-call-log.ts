@@ -91,6 +91,18 @@ try {
     assert.equal(r.review?.verdict, 'progress');
   });
 
+  await check('a call they ended after confirming is done (the checker still reads the transcript)', () => {
+    const r = log.applyReview(dropped, review({ verdict: 'goal_met', goalMet: true, summary: 'Sam booked Thursday at 4 under Alex Rivera.' }));
+    assert.equal(r.status, 'done');
+    assert.equal(r.outcome, 'Sam booked Thursday at 4 under Alex Rivera.');
+  });
+
+  await check('a hang-up on the intro moves on to the next place instead of asking the owner', () => {
+    const r = log.applyReview(dropped, review({ verdict: 'hung_up', summary: 'A person answered and hung up right after the intro.', learned: 'They only said "Hello?".', nextStep: 'Call again.' }));
+    assert.equal(r.status, 'failed');
+    assert.match(r.outcome, /hung up right after the intro/);
+  });
+
   await check('a dropped call stuck in a menu stays a retry, with an honest outcome', () => {
     const r = log.applyReview(dropped, review({ answeredBy: 'menu', verdict: 'menu_stuck', summary: 'Only the phone menu answered; no person.', learned: '', nextStep: '' }));
     assert.equal(r.status, 'retry_later');
@@ -149,7 +161,7 @@ try {
     assert.equal(personSpoke(newMenu), false);
     assert.equal(botWrappedUp(newDone), true);
     // Rows from before the review: judged by their transcript lines.
-    const old = 'National Fence: retry_later — The call ended without a recorded outcome.\nBot said: Hi\nThem: One second.';
+    const old = 'Example Fence: retry_later — The call ended without a recorded outcome.\nBot said: Hi\nThem: One second.';
     assert.equal(personSpoke(old), true, 'a person said "One second" — that counts as reached');
     assert.equal(botWrappedUp(old), false);
     assert.equal(personSpoke('X: voicemail — Left a message.\nThem: Leave a message at the tone.'), false);

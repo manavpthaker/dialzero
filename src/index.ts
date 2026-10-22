@@ -4,7 +4,8 @@ import { initUsers, resolveUser, isAllowed, getRedirectMessage } from './user-re
 import { initGroups, resolveGroup } from './group-resolver.js';
 import { runAgent, FAMILY_SILENT_RESPONSE } from './agent.js';
 import { detectMode } from './router.js';
-import { createAsyncTask, completeAsyncTask, failAsyncTask } from './db.js';
+import db, { createAsyncTask, completeAsyncTask, failAsyncTask, setMemory } from './db.js';
+import { startStallWatch } from './lib/stall-watch.js';
 import { registerMcpTools } from './tools/index.js';
 import { startScheduler } from './scheduler.js';
 import { startHeartbeat } from './heartbeat.js';
@@ -23,6 +24,7 @@ import { startWebTaskRunner } from './web-task.js';
 import { startFollowups } from './followups.js';
 import { startFamilyRequests } from './family-requests.js';
 import { startOmiSync } from './omi-sync.js';
+import { startTextLoops } from './text-loops.js';
 import { recordRunningSha } from './lib/running-sha.js';
 import { startChromeHealth } from './lib/chrome-health.js';
 import { startTakeoverServer } from './takeover-server.js';
@@ -114,6 +116,17 @@ async function main() {
     ['family-requests', startFamilyRequests],
     // Health watchdog: texts once, with the fix, when something stays broken 30 minutes.
     ['watchdog', startWatchdog],
+    // Freezes of the bot's thread, logged with what ran just before (npm run stalls).
+    ['stall-watch', () => {
+      startStallWatch({
+        callLive: () => {
+          try {
+            return ((db.prepare("SELECT COUNT(*) c FROM errands WHERE call_state IS NOT NULL AND call_started_at > datetime('now', '-20 minutes')").get() as { c: number }).c) > 0;
+          } catch { return false; }
+        },
+        save: (s) => setMemory('system', 'stalls', JSON.stringify(s)),
+      });
+    }],
     // Morning check: a practice call + signed-in site check (CANARY_ENABLED=true).
     ['canary', startCanary],
   ];
@@ -172,6 +185,13 @@ async function main() {
       console.log('[assistant] Authenticated Family message received');
     } else {
       console.log(`[assistant] ${user.name} → ${group.name}: ${text.slice(0, 80)}...`);
+    }
+
+    // A live call is waiting on the owner's answer (src/call-safety-net.ts): this text is it.
+    if (group.key === 'admin' && user.role === 'admin' && text.trim()) {
+      const { takeAskAnswer } = await import('./call-safety-net.js');
+      const asked = takeAskAnswer(text);
+      if (asked) { await sendMessage(remoteJid, `📞 Got it, telling ${asked.who}.`); return; }
     }
 
     // Everything below is work a human is actively waiting on, so it runs in the
@@ -296,6 +316,7 @@ async function main() {
     ['family-scheduler', () => { startFamilyRuntimeScheduler(); }],
     ['email-reconciliation', startEmailReconciliationRuntime],
     ['omi-sync', startOmiSync],                    // also needs OMI_MCP_KEY; OMI_SYNC_ENABLED
+    ['text-loops', startTextLoops],                // the owner's own text threads → replies owed, promises, plans
     ['speech-coach', startSpeechCoach],            // weekly speaking summary; SPEECH_COACH_ENABLED
     ['scorecard', startScorecard],                 // weekly scorecard into Sunday's morning check-in
   ];

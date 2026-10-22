@@ -85,7 +85,14 @@
     "test:omi": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-omi.ts",
     "test:job-updates": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-job-updates.ts",
     "test:reception": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-reception.ts",
-    "test:takeover": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-takeover.ts"
+    "test:takeover": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-takeover.ts",
+    "test:call-states": "tsx scripts/test-call-states.ts",
+    "test:safety-net": "tsx scripts/test-safety-net.ts",
+    "test:stall-watch": "tsx scripts/test-stall-watch.ts",
+    "stalls": "tsx scripts/stalls.ts",
+    "test:text-loops": "tsx scripts/test-text-loops.ts",
+    "texts:loops": "tsx scripts/text-loops-review.ts",
+    "omi:reread": "tsx scripts/omi-reread.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

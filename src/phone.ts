@@ -34,6 +34,9 @@ import {
 } from './reception.js';
 import { CallTimeline } from './lib/call-timing.js';
 import { ReplyGate } from './lib/reply-gate.js';
+import { CallStage, isGoodbye, sendMessageKey } from './lib/call-stage.js';
+import { MenuNav } from './menu-nav.js';
+import { openAsk, registerLiveCall, unregisterLiveCall, callsChanged } from './call-safety-net.js';
 import { applyReview, recordCall, reviewCall, reviewLine, type CallReview, type EndReason } from './call-log.js';
 import { armedScene, isPracticeCall, sceneStep, SCENES, type Scene } from './practice-line.js';
 
@@ -117,6 +120,8 @@ export interface CallResult {
   review?: CallReview;
   /** "Review: …; ended: they hung up; reply 1.4s median…", for the errand log. */
   reviewLine?: string;
+  /** The owner was rung in and took the call over; nothing left for the assistant to check. */
+  handedToOwner?: boolean;
 }
 
 export interface CallNotes {
@@ -355,8 +360,12 @@ interface Conf {
   dialTo?: string; bizStarted?: boolean; bizSid?: string; assistantSid?: string;
   /** Set by the live session: the business picked up / never did. */
   onAnswered?: () => void; onNoAnswer?: (status: string) => void; answered?: boolean;
+  /** The owner rung into the call ("bring them in"), and what happens when they pick up or don't. */
+  ownerSid?: string; onOwnerJoined?: () => void; onOwnerMissed?: (status: string) => void;
   /** Their leg ended (they hung up, or the conference closed) while the assistant's session was live. */
   bizEndedAt?: number;
+  /** Twilio's answering-machine verdict on their leg, and who wants it. */
+  amdResult?: string; onAmd?: (answeredBy: string) => void;
 }
 const confs = new Map<string, Conf>();
 const rawStepUrl = (step: string, token: string, extra = '') => `${PUBLIC_URL}/twilio/voice?step=${step}&t=${token}${extra}`;
@@ -407,8 +416,33 @@ export async function conferenceStep(step: string, token: string, params: URLSea
     const form = new URLSearchParams({ From: TWILIO_NUMBER, To: c.dialTo, Beep: 'false', EndConferenceOnExit: 'true', Timeout: '30', StatusCallback: rawStepUrl('biz', token), ...record });
     form.append('StatusCallbackEvent', 'answered');
     form.append('StatusCallbackEvent', 'completed');
-    twilioPost(`Conferences/${c.sid}/Participants.json`, form).then((r) => { c.bizSid = String(r.call_sid ?? '') || undefined; })
+    // Answering-machine detection on their leg: DetectMessageEnd reports a
+    // machine when its greeting ends (the beep), so the assistant knows when to leave a message.
+    const amd = env('PHONE_BUSINESS_AMD', 'true') !== 'false'
+      ? { MachineDetection: 'DetectMessageEnd', MachineDetectionTimeout: '30', AmdStatusCallback: rawStepUrl('amd', token), AmdStatusCallbackMethod: 'POST' }
+      : null;
+    const withAmd = new URLSearchParams(form);
+    if (amd) for (const [k, v] of Object.entries(amd)) withAmd.append(k, v);
+    const dialed = (r: Record<string, unknown>) => { c.bizSid = String(r.call_sid ?? '') || undefined; };
+    twilioPost(`Conferences/${c.sid}/Participants.json`, withAmd).then(dialed)
+      .catch((err) => {
+        if (!amd) throw err;
+        // Twilio refused the detection settings: dial without them rather than lose the call.
+        console.warn('[phone] assistant-first: dialing without answering-machine detection:', err.message);
+        return twilioPost(`Conferences/${c.sid}/Participants.json`, form).then(dialed);
+      })
       .catch((err) => { console.error('[phone] assistant-first: could not dial the business:', err.message); c.onNoAnswer?.('failed'); });
+    return empty;
+  }
+  if (step === 'owner') {
+    const st = params.get('CallStatus') || '';
+    if (st === 'in-progress') c.onOwnerJoined?.();
+    else if (['no-answer', 'busy', 'failed', 'canceled'].includes(st)) c.onOwnerMissed?.(st);
+    return empty;
+  }
+  if (step === 'amd') {
+    const who = params.get('AnsweredBy') || '';
+    if (who) { c.amdResult = who; c.onAmd?.(who); }
     return empty;
   }
   if (step === 'biz') {
@@ -835,6 +869,12 @@ export function isIntro(said: string, bot = getBotName()): boolean {
   return new RegExp(`\\b(this is|i'?m|it'?s|my name is) ${b}\\b`).test(t) || /\bai assistant\b/.test(t);
 }
 
+/** What the assistant does once a voicemail greeting is over. Exported for tests. */
+export function voicemailRule(): string {
+  const cb = callbackNumber();
+  return `YOU HAVE REACHED VOICEMAIL and the greeting is over: the beep has sounded. Leave ONE short message now, in this order: who you are (${getBotName()}, ${(getOwner().fullName || getOwner().name)}'s AI assistant); why you're calling, in one sentence; and the number to call back, said twice, slowly: the one in the details you may share if there is one${cb ? `, otherwise ${spellNumber(cb)}` : ''}. Then say goodbye and call end_call with status "voicemail" (or "done" if the goal was only to leave a message). Note anything useful the greeting said (hours, another number, an emergency line) in end_call's notes.`;
+}
+
 /** The number a business can call back: PHONE_CALLBACK_NUMBER, else the assistant's own line. */
 export function callbackNumber(): string {
   return env('PHONE_CALLBACK_NUMBER') || TWILIO_NUMBER;
@@ -849,6 +889,8 @@ export function errandSessionConfig(call: ErrandCall, opts: { introduced?: boole
   const bot = getBotName();
   const callback = callbackNumber();
   const recorded = env('PHONE_RECORD_CALLS', 'false') === 'true';
+  // The assistant can ask the owner or ring them in, on assistant-first conference calls for an errand.
+  const safetyNet = !call.callback && !!call.conf && !!call.errandId && env('PHONE_SAFETY_NET', 'true') !== 'false';
   const returning = call.callback
     ? [
       `${call.name || 'A business'} is calling you back: they are returning your earlier call on behalf of ${full}. Answer the phone first: "Hi, this is ${bot}, ${full}'s assistant. Thanks for calling back." Then pick up where things left off.`,
@@ -875,16 +917,28 @@ export function errandSessionConfig(call: ErrandCall, opts: { introduced?: boole
       `Tone: warm and brief, like a good front-desk person. Friendly, gets to the point, thanks people. Short spoken sentences, no filler, no over-apologizing. Use ${owner}'s full name (${full}) for bookings and spell the last name if asked.`,
       `Wait quietly on hold. Answer their questions only with the details above; if you do not know something, say you will check with ${owner} and get back to them.`,
       `If they ask whether you are a real person or a robot, say plainly that you are an AI assistant working for ${owner}. Never claim to be ${owner} or a human.`,
-      `If they ask to speak with ${owner} directly, say ${owner} isn't available right now but you can have ${owner} call them back, and ask for the best number and time. Put that in follow_up.`,
+      safetyNet
+        ? `${owner} is reachable while you call. If they ask something only ${owner} can answer (a decision, a detail you weren't given, OK on a price or a time), say "Let me check, one moment" and call check_with_owner with the question; then tell them the answer. If they ask to speak with ${owner}, say "Sure, let me connect you, one moment" and call bring_in_owner.`
+        : `If they ask to speak with ${owner} directly, say ${owner} isn't available right now but you can have ${owner} call them back, and ask for the best number and time. Put that in follow_up.`,
       `Never give out card numbers, bank details, Social Security numbers, passwords, or PINs. Never agree to a charge, contract, cancellation fee, or anything beyond the goal; say ${owner} will confirm.`,
       // FCC 47 CFR 64.1200(b): an artificial-voice message names who it's from and gives a number to call back.
       `If you reach voicemail, wait for the beep, then leave one short message: who you are (${bot}, ${full}'s AI assistant), the reason for the call, and a number to call back: the one in the details you may share if there is one${callback ? `, otherwise ${spellNumber(callback)}` : ''}. Then end the call.`,
       "If you book anything (an appointment, reservation, pickup, visit), repeat the day and time back to them, ask for a confirmation number if they have one, and fill in end_call's booking.",
-      `Keep notes like a good assistant. When a person gives you information, an answer, or a commitment, ask for their name casually once the main thing is settled and BEFORE you say goodbye ("Thanks so much, and what's your name, in case I need to call back?"); never bundle it with another question. If they already told you their name (e.g. in their greeting: "this is Dana"), don't ask; use it. Note any ticket, case or confirmation number, a direct line or extension, and anything they said they'd do and by when. Put all of it in end_call's notes. If the goal mentions earlier calls to this place, refer to them naturally ("Pat mentioned on Monday that…") instead of starting from scratch.`,
+      `Keep notes like a good assistant. When a person gives you information, an answer, or a commitment, ask for their name casually once the main thing is settled and BEFORE you say goodbye ("Thanks so much, and what's your name, in case I need to call back?"); never bundle it with another question. If they already told you their name (e.g. in their greeting: "this is Dana"), don't ask; use it. If it's an automated or AI assistant ("I'm the store assistant", "digital assistant"), don't ask its name at all. Note any ticket, case or confirmation number, a direct line or extension, and anything they said they'd do and by when. Put all of it in end_call's notes. If the goal mentions earlier calls to this place, refer to them naturally ("Pat mentioned on Monday that…") instead of starting from scratch.`,
       'When the goal is done or clearly cannot be done, say thank you and goodbye, then call end_call with what happened.',
+      // Asking for a time and hanging up before they confirmed it lost bookings in practice.
+      'Telling them what you want is not done: wait until THEY confirm it (they say it is booked, set, or "you\'re all set") and answer what they ask (a name, a number) before you say goodbye or call end_call.',
       'Once THEY say goodbye ("bye now", "have a good one", "you\'re all set, thanks for calling"), the call is over: say a short goodbye in a few words and call end_call in the same turn. Never start a new question after their goodbye.',
     ].filter(Boolean).join('\n'),
-    tools: [...(call.callback ? [] : [{
+    tools: [...(safetyNet ? [{
+      type: 'function', name: 'check_with_owner',
+      description: `Ask ${owner} a question while the call stays open; ${owner} gets a text and the answer comes back as this tool's result (it can take a minute or two). Say "Let me check, one moment" first.`,
+      parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question, with the context needed, e.g. "They can do Thursday 4pm or Friday 10am: which?"' } }, required: ['question'] },
+    }, {
+      type: 'function', name: 'bring_in_owner',
+      description: `Ring ${owner} into this call because they asked to talk to ${owner}. Say "Sure, let me connect you, one moment" first; when ${owner} picks up you'll be told to hand over.`,
+      parameters: { type: 'object', properties: { reason: { type: 'string', description: 'One line for the owner\'s text: who wants them and why.' } }, required: ['reason'] },
+    }] : []), ...(call.callback ? [] : [{
       type: 'function', name: 'press_keys',
       description: 'Press keys on an automated phone menu. Use only when a recording asks you to press a key. The line pauses for a second while the keys are sent, then you keep listening.',
       parameters: {
@@ -1031,11 +1085,62 @@ function runCall(callId: string, call: PendingCall): void {
   // start when they pick up, and it stays quiet until then (nothing to hear but silence).
   const firstConf = call.kind === 'errand' && call.conf ? confs.get(call.conf.token) : undefined;
   const waitForAnswer = !!firstConf?.dialTo && !inbound;
+  // Call stages (src/lib/call-stage.ts): on business calls through the assistant-first
+  // conference, the assistant speaks only to a person, or to a voicemail after its beep; a phone
+  // menu is worked by the code (src/menu-nav.ts) and hold is waited out in silence.
+  const errandCall = call.kind === 'errand' ? call : null;
+  // Needs their words transcribed (PHONE_TRANSCRIBE_THEM), since the words decide the stage.
+  const staged = echoGuardOn(call) && !!firstConf && !!errandCall && !errandCall.callback
+    && env('PHONE_CALL_STAGES', 'true') !== 'false' && env('PHONE_TRANSCRIBE_THEM', 'true') !== 'false';
+  const stage = new CallStage();
+  const menu = new MenuNav(errandCall?.goal ?? '');
+  let lastCommitted = '';
+  const transcribed = new Set<string>();
+  let owedReply = false;
+  let owedTimer: ReturnType<typeof setTimeout> | undefined;
+  let greetingQuiet: ReturnType<typeof setTimeout> | undefined;
+  let voicemailLeft = false;
+  let sentMessageKey = false;
+  // src/call-safety-net.ts: ask the owner, or ring them in, on staged errand calls.
+  const netKey = staged && errandCall?.errandId ? `errand:${errandCall.errandId}` : '';
+  const whoCalled = errandCall ? (errandCall.name || errandCall.to) : '';
+  let askPending = false;
+  let ownerRinging = false;
+  let handedToOwner = false;
+  let lastHoldLine = 0;
+  let menuBusy = false;
+  // Listening: until a person is on, quick silence-based turns
+  // (server VAD, 500ms), so a voicemail greeting's or a menu's words arrive in time. The
+  // practice voicemail hung up before semantic VAD ever closed its greeting, and Twilio's
+  // machine verdict came ~15s in, after the hang-up. With a person: semantic, as before.
+  const listenFast = { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: Number(env('PHONE_FAST_SILENCE_MS', '500')), create_response: false, interrupt_response: false };
+  const listenPatient = { type: 'semantic_vad', eagerness: env('PHONE_TURN_EAGERNESS', 'low'), create_response: false, interrupt_response: false };
+  const setListening = (fast: boolean) => send({ type: 'session.update', session: { type: 'realtime', audio: { input: { turn_detection: fast ? listenFast : listenPatient } } } });
+  // With a person too, by default: semantic VAD sat on "Perfect, you're
+  // all set. Bye now." past the practice person's 6s wait, so the booking was never logged
+  // on hello and greeting. The reply beat (PHONE_YIELD_MS) is what stops talk-over at pauses.
+  // PHONE_PERSON_LISTEN=semantic puts the patient setting back for people.
+  const patientWithPeople = env('PHONE_PERSON_LISTEN', 'fast') === 'semantic';
+  // They said goodbye: the assistant's next turn is a short goodbye and end_call, nothing
+  // else (asking for a name after "bye now" gets a hang-up).
+  let closingOwed = false;
+  stage.onChange = (c) => {
+    console.log(`[phone] ${callId}: ${c.from} → ${c.to} (${c.why})`);
+    if (patientWithPeople) {
+      if (c.to === 'person') setListening(false);
+      else if (c.from === 'person') setListening(true);
+    }
+    // An intro said to a machine doesn't count: the next person still hears one.
+    if (errandCall && introduced && (c.to === 'menu' || c.to === 'hold' || c.to === 'voicemail')) {
+      introduced = false;
+      send({ type: 'session.update', session: { type: 'realtime', instructions: errandSessionConfig(errandCall).instructions } });
+    }
+  };
   let speakFirst: ReturnType<typeof setTimeout> | undefined;
   let deadAir: ReturnType<typeof setTimeout> | undefined;
   const startTimers = (speakMs: number) => {
     if (call.kind !== 'errand' || inbound) return;
-    speakFirst = setTimeout(() => { if (!botSpoke && !ended) send({ type: 'response.create' }); }, speakMs);
+    speakFirst = setTimeout(() => { if (!botSpoke && !ended && (!staged || stage.mayTalk)) send({ type: 'response.create' }); }, speakMs);
     deadAir = setTimeout(() => {
       if (!botSpoke && !ended) { console.warn(`[phone] ${callId}: nothing happened on the line, hanging up`); hangup(0, 'dead_air'); }
     }, onMenu ? 120_000 : 75_000);
@@ -1063,7 +1168,7 @@ function runCall(callId: string, call: PendingCall): void {
   if (waitForAnswer && firstConf) {
     // They pick up and say hello into a line the assistant is already on: let VAD take their
     // greeting, and speak first after a short pause if they don't say anything.
-    firstConf.onAnswered = () => { console.log(`[phone] ${callId}: they picked up`); timeline.pickedUp(); startTimers(PICKUP_SPEAK_MS); };
+    firstConf.onAnswered = () => { console.log(`[phone] ${callId}: they picked up`); timeline.pickedUp(); stage.pickedUp(); startTimers(PICKUP_SPEAK_MS); };
     firstConf.onNoAnswer = (st) => {
       if (ended) return;
       console.log(`[phone] ${callId}: business ${st}`);
@@ -1090,8 +1195,140 @@ function runCall(callId: string, call: PendingCall): void {
   const respond = () => {
     if (ended) return;
     if (talking) { respondAfterDone = true; return; }
+    // Waiting on the owner's answer, or for them to pick up: one short line now and then, nothing more.
+    if (askPending || ownerRinging) {
+      if (Date.now() - lastHoldLine > 20_000) {
+        lastHoldLine = Date.now();
+        send({ type: 'response.create', response: { instructions: `Say only: "${askPending ? 'Still checking, one moment.' : 'Connecting you now, one moment.'}"` } });
+      }
+      return;
+    }
+    if (staged) {
+      // Their last turn's words decide the stage (menu? voicemail? a person?): wait for
+      // its transcript, up to 2.5s. Answering first is how the intro went to a menu.
+      if (lastCommitted && !transcribed.has(lastCommitted)) {
+        owedReply = true;
+        clearTimeout(owedTimer);
+        owedTimer = setTimeout(() => { if (owedReply) { owedReply = false; transcribed.add(lastCommitted); respond(); } }, 2_500);
+        return;
+      }
+      if (stage.stage === 'menu') { void navigateMenu(); return; }
+      if (stage.stage === 'hold') return;
+      if (closingOwed && stage.stage === 'person' && errandCall) {
+        closingOwed = false;
+        send({ type: 'response.create', response: { instructions: `${errandSessionConfig(errandCall, { introduced }).instructions}\nTHEY JUST SAID GOODBYE. Say only a short goodbye, a few words ("Thanks so much, bye!"), and call end_call now with what happened. Do not ask anything.` } });
+        return;
+      }
+      if (stage.stage === 'voicemail') {
+        if (stage.beep) leaveVoicemail();
+        else {
+          // No beep reported: the greeting going quiet for a moment is the cue. The turn
+          // already closed on 500ms of quiet, so wait only a little more: at 1.5s the message
+          // started ~2.3s after the tone and a short mailbox hung up first.
+          clearTimeout(greetingQuiet);
+          greetingQuiet = setTimeout(() => { stage.greetingOver(); leaveVoicemail(); }, Number(env('PHONE_VOICEMAIL_CUE_MS', '400')));
+        }
+        return;
+      }
+    }
     send({ type: 'response.create' });
   };
+  const navigateMenu = async () => {
+    if (!errandCall || menuBusy || ended) return;
+    menuBusy = true;
+    try {
+      const choice = await menu.decide();
+      if (ended) return;
+      console.log(`[phone] ${callId}: menu: ${choice.action}${choice.digits ? ` ${choice.digits}` : ''}${choice.words ? ` "${choice.words}"` : ''} (${choice.reason})`);
+      if (choice.action === 'press' && choice.digits) {
+        await pressKeysInConference(errandCall, choice.digits);
+        errandCall.menuLog = [...(errandCall.menuLog ?? []), `Pressed ${choice.digits} (${choice.reason})`];
+      } else if (choice.action === 'say' && choice.words) {
+        send({ type: 'response.create', response: { instructions: `You are on an automated phone menu. Say exactly these words and nothing else: "${choice.words}"` } });
+      } else if (choice.action === 'stuck') {
+        if (!status) { status = 'retry_later'; outcome = `Stuck in their phone menu (${choice.reason}).`; followUp = 'Try a different number or department, or another time.'; }
+        hangup(500);
+      }
+    } catch (err) {
+      console.warn(`[phone] ${callId}: menu step failed:`, err instanceof Error ? err.message : err);
+    } finally {
+      menuBusy = false;
+    }
+  };
+  const leaveVoicemail = () => {
+    if (!errandCall || voicemailLeft || ended) return;
+    voicemailLeft = true;
+    clearTimeout(greetingQuiet);
+    // So the greeting itself is transcribed into the record (it may never have closed as a turn).
+    send({ type: 'input_audio_buffer.commit' });
+    send({ type: 'response.create', response: { instructions: `${errandSessionConfig(errandCall, { introduced }).instructions}\n${voicemailRule()}` } });
+  };
+  // Past the beep: leave the message now, or right after whatever the assistant is saying.
+  const voicemailNow = () => {
+    if (!(stage.stage === 'voicemail' && stage.beep) || voicemailLeft) return;
+    if (talking) respondAfterDone = true; else leaveVoicemail();
+  };
+  // Ring the owner into this conference; when they pick up, the assistant hands over and drops off.
+  const patchOwnerIn = async (reason: string): Promise<string> => {
+    const c = firstConf;
+    const cell = ownerPhones()[0];
+    const token = errandCall?.conf?.token;
+    if (!errandCall || !c?.sid || !cell || !token) return "Can't ring the owner into this call. Offer a call back.";
+    if (ownerRinging || handedToOwner) return 'Already ringing the owner.';
+    ownerRinging = true;
+    const ownerName = getOwner().name;
+    c.onOwnerJoined = () => {
+      if (handedToOwner || ended) return;
+      handedToOwner = true;
+      ownerRinging = false;
+      console.log(`[phone] ${callId}: ${ownerName} picked up; handing over`);
+      // The assistant's leg must be able to leave without ending the call for the two of them.
+      if (c.assistantSid) twilioPost(`Conferences/${c.sid}/Participants/${c.assistantSid}.json`, { EndConferenceOnExit: 'false' }).catch((err) => console.warn('[phone] keep-conference update failed:', err.message));
+      send({ type: 'response.create', response: { instructions: `${errandSessionConfig(errandCall, { introduced }).instructions}\n${ownerName.toUpperCase()} JUST JOINED THIS CALL. Say one short line: "${ownerName}'s on the line now, I'll let you two talk." Then call end_call with status "done" and outcome "Handed the call to ${ownerName}".` } });
+    };
+    c.onOwnerMissed = (st) => {
+      ownerRinging = false;
+      if (handedToOwner || ended) return;
+      console.log(`[phone] ${callId}: ${ownerName} didn't pick up (${st})`);
+      send({ type: 'response.create', response: { instructions: `${errandSessionConfig(errandCall, { introduced }).instructions}\n${ownerName} didn't pick up. Tell them ${ownerName} isn't available right now and will call them back; ask for the best number and time and put it in follow_up.` } });
+    };
+    // 18s rings: short of most carriers' voicemail pickup, so the owner's voicemail doesn't join the call.
+    const form = new URLSearchParams({ From: TWILIO_NUMBER, To: `+1${cell}`, Beep: 'false', EndConferenceOnExit: 'true', Timeout: '18', StatusCallback: rawStepUrl('owner', token) });
+    form.append('StatusCallbackEvent', 'answered');
+    form.append('StatusCallbackEvent', 'completed');
+    try {
+      await sendInterrupt({ source: 'phone', subject: `patch:${callId}`, kind: 'reply', bypass: 'owner-call', text: `📞 Ringing you into my call with ${whoCalled}: ${reason.slice(0, 160)} Pick up and you're on with them.` });
+      const r = await twilioPost(`Conferences/${c.sid}/Participants.json`, form);
+      c.ownerSid = String(r.call_sid ?? '') || undefined;
+      console.log(`[phone] ${callId}: ringing ${ownerName} into the call`);
+      return 'Ringing the owner now. Tell them "connecting you now, one moment" and wait; you will be told when they pick up or not.';
+    } catch (err) {
+      ownerRinging = false;
+      return `Couldn't ring the owner (${err instanceof Error ? err.message.slice(0, 80) : err}). Offer a call back.`;
+    }
+  };
+  if (netKey) registerLiveCall(netKey, whoCalled, () => patchOwnerIn('You asked to take over from the app.'));
+  // A turn's words are in: if a reply was waiting on them, it can go now.
+  const markTranscribed = (itemId: string) => {
+    transcribed.add(itemId);
+    if (owedReply && itemId === lastCommitted) { owedReply = false; clearTimeout(owedTimer); respond(); }
+  };
+  if (staged && firstConf) {
+    firstConf.onAmd = (who) => {
+      console.log(`[phone] ${callId}: answering-machine check: ${who}`);
+      stage.amd(who);
+      if (stage.machineSuspected) {
+        // Close the greeting as a turn so its words can confirm it (a voicemail scene
+        // may never close on its own, and the mailbox hangs up); no words in 3s
+        // means the machine verdict stands.
+        send({ type: 'input_audio_buffer.commit' });
+        setTimeout(() => { stage.machineConfirmed(); voicemailNow(); }, 3_000);
+        return;
+      }
+      voicemailNow();
+    };
+    if (firstConf.amdResult) firstConf.onAmd(firstConf.amdResult);
+  }
   // A finished turn waits a beat, and the assistant holds back if they keep talking (src/lib/reply-gate.ts).
   const gate = new ReplyGate(respond, Number(env('PHONE_YIELD_MS', '700')));
   const settle = (itemId: string, echo: boolean) => {
@@ -1117,10 +1354,17 @@ function runCall(callId: string, call: PendingCall): void {
       if (botEndsAt === Infinity) botEndsAt = now;
       if (respondAfterDone) { respondAfterDone = false; setTimeout(() => respond(), 0); }
     } else if (ev.type === 'input_audio_buffer.speech_started' && ev.item_id) {
+      clearTimeout(greetingQuiet); // the voicemail greeting isn't over yet
       if (now < botEndsAt + ECHO_TAIL_MS) suspect.add(String(ev.item_id));
-      else gate.theyStarted();
+      else {
+        gate.theyStarted();
+        // They kept talking while a reply waited on the last turn's words: hold it for
+        // their next pause (otherwise it talks over them).
+        if (owedReply) { owedReply = false; clearTimeout(owedTimer); }
+      }
     } else if (ev.type === 'input_audio_buffer.committed' && ev.item_id) {
       const id = String(ev.item_id);
+      if (staged) lastCommitted = id;
       if (!suspect.has(id)) { gate.turnEnded(); return; }
       // No transcript in time: treat it as them, as before.
       waiting.set(id, setTimeout(() => settle(id, false), 2_500));
@@ -1133,6 +1377,7 @@ function runCall(callId: string, call: PendingCall): void {
 
   ws.on('open', () => {
     console.log(`[phone] control socket open for ${call.kind} call ${callId}`);
+    if (staged && env('PHONE_FAST_FIRST_LISTEN', 'true') !== 'false') setListening(true);
     // Voicemail picked up a "call me": hang up and text the owner instead of talking to it.
     if (ownerOut && call.twilioSid) {
       answeredBy(call.twilioSid).then((who) => {
@@ -1162,8 +1407,10 @@ function runCall(callId: string, call: PendingCall): void {
   ws.on('message', async (raw) => {
     let ev: Record<string, any>;
     try { ev = JSON.parse(String(raw)); } catch { return; }
-    if (call.kind === 'errand' && call.reception && (ev.type === 'error' || /failed/.test(ev.type))) {
-      console.warn(`[phone] reception ${ev.type}: ${JSON.stringify(ev.error ?? ev).slice(0, 300)}`);
+    // Errors and failed transcriptions on every business call (a voicemail
+    // greeting was never transcribed and nothing said why).
+    if (call.kind === 'errand' && (ev.type === 'error' || /failed/.test(ev.type))) {
+      console.warn(`[phone] ${callId} ${ev.type}: ${JSON.stringify(ev.error ?? ev).slice(0, 300)}`);
     }
     if (echoGuard) onEchoGuardEvent(ev);
     // Timing: the audio-buffer events say when the assistant's voice actually plays on the line;
@@ -1181,10 +1428,25 @@ function runCall(callId: string, call: PendingCall): void {
     }
     if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.item_id && echoIds.has(String(ev.item_id))) {
       // The assistant's own echo: not something they said.
+      markTranscribed(String(ev.item_id));
     } else if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
       heardOwner = true;
       transcript.push(`${call.kind === 'owner' ? 'You' : 'Them'}: ${String(ev.transcript).trim()}`);
       timeline.line('Them', String(ev.transcript));
+      if (staged) {
+        // After the message: "To send your message, press 1" gets its key at once (a
+        // send/replay/re-record menu otherwise loops and the message is never sent).
+        const sendKey = voicemailLeft && errandCall ? sendMessageKey(String(ev.transcript)) : null;
+        if (sendKey && errandCall && !sentMessageKey) {
+          sentMessageKey = true;
+          pressKeysInConference(errandCall, sendKey).then(() => {
+            errandCall.menuLog = [...(errandCall.menuLog ?? []), `Pressed ${sendKey} (send the voicemail)`];
+            console.log(`[phone] ${callId}: pressed ${sendKey} to send the voicemail`);
+          }).catch((err) => console.warn(`[phone] ${callId}: send-message key failed:`, err.message));
+        } else if (stage.line(String(ev.transcript)) === 'menu' && !voicemailLeft) menu.heard(String(ev.transcript));
+        if (stage.stage === 'person' && !status && isGoodbye(String(ev.transcript))) closingOwed = true;
+      }
+      if (ev.item_id) markTranscribed(String(ev.item_id));
       if (wake && isRealWakeAnswer(String(ev.transcript))) wakeAnswers++;
     } else if (ev.type === 'response.created' || ev.type === 'input_audio_buffer.speech_started') {
       if (ev.type === 'input_audio_buffer.speech_started') {
@@ -1194,13 +1456,15 @@ function runCall(callId: string, call: PendingCall): void {
       // A response is already coming (or they're talking): the speak-first timer must
       // not start a second one. That race made the assistant say its intro twice.
       botSpoke = true;
+    } else if ((ev.type === 'conversation.item.input_audio_transcription.completed' || ev.type === 'conversation.item.input_audio_transcription.failed') && ev.item_id) {
+      markTranscribed(String(ev.item_id)); // empty or failed: still unblocks a waiting reply
     } else if (ev.type === 'response.output_audio_transcript.done' && ev.transcript) {
       botSpoke = true;
       transcript.push(`Bot: ${String(ev.transcript).trim()}`);
       timeline.line('Bot', String(ev.transcript));
       // Introduce once, enforced here: once it has said who it is, the opener rule is
       // replaced by "never again, a short repair at most" for the rest of the call.
-      if (call.kind === 'errand' && !call.reception && !introduced && isIntro(String(ev.transcript))) {
+      if (call.kind === 'errand' && !call.reception && !introduced && (!staged || stage.stage === 'person' || stage.stage === 'greeting') && isIntro(String(ev.transcript))) {
         introduced = true;
         send({ type: 'session.update', session: { type: 'realtime', instructions: errandSessionConfig(call, { introduced: true }).instructions } });
       }
@@ -1269,6 +1533,21 @@ function runCall(callId: string, call: PendingCall): void {
         // Refused once only, so a voicemail or a determined owner can still end it.
         wakeHangUpRefused = true;
         output = 'The owner is not confirmed awake yet. Do not hang up: ask another question the owner has to answer out loud, then call confirm_awake.';
+      } else if (ev.name === 'check_with_owner' && errandCall && netKey) {
+        const q = String(args.question || '').trim().slice(0, 300);
+        askPending = true;
+        lastHoldLine = Date.now();
+        sendInterrupt({ source: 'phone', subject: `ask:${callId}`, kind: 'reply', bypass: 'owner-call', text: `📞 ${whoCalled}, on the line now: ${q}\nReply in the next 2 minutes and I'll tell them.` })
+          .catch((err) => console.warn('[phone] ask text failed:', err));
+        console.log(`[phone] ${callId}: asking ${getOwner().name}: ${q.slice(0, 80)}`);
+        const answer = await openAsk(netKey, whoCalled, q);
+        askPending = false;
+        output = answer
+          ? `${getOwner().name} says: "${answer}". Tell them, in your own words.`
+          : `No answer yet. Tell them you'll check and get back to them, and put the question in follow_up.`;
+      } else if (ev.name === 'bring_in_owner' && errandCall && netKey) {
+        output = await patchOwnerIn(String(args.reason || 'They asked to talk to you.'));
+        lastHoldLine = Date.now();
       } else if (ev.name === 'end_call' || ev.name === 'hang_up') {
         outcome = String(args.outcome || '');
         followUp = String(args.follow_up || '');
@@ -1296,7 +1575,11 @@ function runCall(callId: string, call: PendingCall): void {
     for (const t of waiting.values()) clearTimeout(t);
     if (echoes) console.log(`[phone] ${callId}: dropped ${echoes} echo turn(s) of the assistant's own voice`);
     gate.cancel();
+    clearTimeout(owedTimer);
+    clearTimeout(greetingQuiet);
     if (gate.yields) console.log(`[phone] ${callId}: held back ${gate.yields}x while they kept talking`);
+    if (netKey) unregisterLiveCall(netKey);
+    if (staged && stage.changes.length) console.log(`[phone] ${callId}: stages ${stage.path()}`);
     if (handedOff) {
       console.log(`[phone] ${callId} handed off to the next menu step`);
       return;
@@ -1308,7 +1591,7 @@ function runCall(callId: string, call: PendingCall): void {
     if (wake) {
       try { wakeHooks?.onFinished(wake.id, wake.attempt, { awake: isAwake(), answers: wakeAnswers }); } catch (err) { console.error('[phone] wake hook failed:', err); }
     }
-    const lineEnd = { timeline, echoes, endReasonOf: (): EndReason => endReason || (firstConf?.bizEndedAt ? 'they_hung_up' : 'line_dropped') };
+    const lineEnd = { timeline, echoes, handedToOwner, stages: staged ? stage.path() : '', endReasonOf: (): EndReason => endReason || (firstConf?.bizEndedAt ? 'they_hung_up' : 'line_dropped') };
     finishCall(callId, call, transcript, outcome, followUp, status, booking, notes, receptionMessage, lineEnd).catch((err) => console.error('[phone] wrap-up failed:', err));
   });
 }
@@ -1332,7 +1615,7 @@ async function finishCall(
   booking?: CallBooking,
   notes?: CallNotes,
   receptionMessage?: { callerName: string; callback: string; reason: string; urgent: boolean },
-  lineEnd?: { timeline: CallTimeline; echoes: number; endReasonOf: () => EndReason },
+  lineEnd?: { timeline: CallTimeline; echoes: number; stages?: string; handedToOwner?: boolean; endReasonOf: () => EndReason },
 ): Promise<void> {
   const closedAt = Date.now();
   if (call.kind === 'errand' && call.reception) {
@@ -1384,6 +1667,7 @@ async function finishCall(
     menuLog: call.menuLog,
     ...(booking ? { booking } : {}),
     ...(notes ? { notes } : {}),
+    ...(lineEnd?.handedToOwner ? { handedToOwner: true } : {}),
   };
   if (lineEnd) result = await reviewAndLog(callId, call, result, status, lineEnd, closedAt);
   if (call.callback) {
@@ -1411,7 +1695,7 @@ async function finishCall(
  */
 async function reviewAndLog(
   callId: string, call: ErrandCall & { twilioSid?: string }, result: CallResult, botStatus: CallStatus | '',
-  lineEnd: { timeline: CallTimeline; echoes: number; endReasonOf: () => EndReason }, closedAt: number,
+  lineEnd: { timeline: CallTimeline; echoes: number; stages?: string; endReasonOf: () => EndReason }, closedAt: number,
 ): Promise<CallResult> {
   try {
     // Their hang-up arrives as a Twilio status callback a moment after the line drops.
@@ -1430,6 +1714,7 @@ async function reviewAndLog(
       practice: !!call.practice, durationS: Math.max(0, (closedAt - lineEnd.timeline.startedAt()) / 1000),
       endReason, botStatus, review, timing, echoes: lineEnd.echoes, menuLog: call.menuLog ?? [],
       transcript, keep: call.keepTranscript, conferenceSid: conf?.sid, twilioSid: conf?.bizSid ?? call.twilioSid,
+      stages: lineEnd.stages || undefined,
     });
     console.log(`[phone] ${callId}: ${reviewed.reviewLine}`);
     return reviewed;
@@ -1760,7 +2045,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (step) {
       if (!twilioSignatureOk(req, params)) throw Object.assign(new Error('bad twilio signature'), { status: 403 });
       const allParams = new URLSearchParams([...params, ...query]);
-      const out = step === 'conf' || step === 'dtmf' || step === 'biz'
+      const out = step === 'conf' || step === 'dtmf' || step === 'biz' || step === 'amd' || step === 'owner'
         ? await conferenceStep(step, query.get('t') || '', allParams)
         : receptionStep(step, query.get('t') || '', params);
       res.writeHead(200, { 'Content-Type': 'text/xml' }).end(out);

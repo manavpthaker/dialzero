@@ -173,7 +173,7 @@ export function isSilentErrand(r: { envelope_json: string }): boolean {
 export function openItems(): OpenItem[] {
   const items = [
     // Practice runs are tests: never in the owner's list, check-ins, or reply context.
-    ...listOpenJobRows(30).filter((j) => !j.title.startsWith('Practice:')).map(jobItem),
+    ...listOpenJobRows(60).filter((j) => !j.title.startsWith('Practice:')).map(jobItem),
     ...listErrands({ open: true, limit: 20 }).filter((r) => !isSilentErrand(r)).slice(0, 10).map(errandItem),
   ];
   const order: Record<ItemStatus, number> = { waiting_on_you: 0, working: 1, watching: 2 };

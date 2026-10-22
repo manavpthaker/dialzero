@@ -17,6 +17,7 @@ export function parseSegments(text: string): Segment[] {
     if (!v || typeof v !== 'object' || depth > 4) return null;
     const o = v as Record<string, unknown>;
     if (Array.isArray(o.transcript_segments)) return o.transcript_segments;
+    if (Array.isArray(o.transcript)) return o.transcript;
     for (const k of Object.keys(o)) {
       const hit = find(o[k], depth + 1);
       if (hit) return hit;
@@ -33,17 +34,61 @@ export function parseSegments(text: string): Segment[] {
 
 export const wordCount = (s: string) => (s.match(/[\p{L}\p{N}']+/gu) ?? []).length;
 
-/** "You: …" / "Speaker 2: …" lines, back-to-back lines from one speaker joined. */
-export function compactTranscript(segs: Segment[], maxChars = 24_000): string {
-  const lines: string[] = [];
+const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * The same words said once. Phone transcripts repeat their own lines as they refine them
+ * (69% of one call's segments were repeats), which spent the prompt budget twice.
+ */
+export function dedupeSegments(segs: Segment[]): Segment[] {
+  const recent: string[] = [];
+  const out: Segment[] = [];
+  for (const s of segs) {
+    const n = norm(s.text);
+    if (!n) continue;
+    const prev = recent[recent.length - 1] ?? '';
+    // A line said again within a few lines (not a phrase someone uses all call long).
+    if ((n.length > 15 && recent.includes(n)) || n === prev || (n.length > 20 && prev.includes(n))) continue;
+    if (prev.length > 20 && n.includes(prev) && out.length) out.pop(); // a refined, longer version of the last line
+    out.push(s);
+    recent.push(n);
+    if (recent.length > 6) recent.shift();
+  }
+  return out;
+}
+
+function lines(segs: Segment[]): string[] {
+  const out: string[] = [];
   let who = '';
   for (const s of segs) {
     const label = s.isUser ? 'You' : `Speaker ${s.speaker}`;
-    if (label === who && lines.length) lines[lines.length - 1] += ` ${s.text}`;
-    else { lines.push(`${label}: ${s.text}`); who = label; }
+    if (label === who && out.length) out[out.length - 1] += ` ${s.text}`;
+    else { out.push(`${label}: ${s.text}`); who = label; }
   }
-  const out = lines.join('\n');
+  return out;
+}
+
+/** "You: …" / "Speaker 2: …" lines, back-to-back lines from one speaker joined. */
+export function compactTranscript(segs: Segment[], maxChars = 24_000): string {
+  const out = lines(segs).join('\n');
   return out.length > maxChars ? `${out.slice(0, maxChars)}\n…[transcript cut here]` : out;
+}
+
+/**
+ * The whole transcript as parts of at most `maxChars`, split between lines, so a long
+ * meeting is read to the end (a 24k cut stopped at minute 17 of a 37-minute meeting).
+ */
+export function transcriptParts(segs: Segment[], maxChars = 24_000, maxParts = 5): string[] {
+  const parts: string[] = [];
+  let cur = '';
+  for (const raw of lines(segs)) {
+    const line = raw.length > maxChars ? raw.slice(0, maxChars) : raw;
+    if (cur && cur.length + line.length + 1 > maxChars) { parts.push(cur); cur = ''; }
+    cur = cur ? `${cur}\n${line}` : line;
+  }
+  if (cur) parts.push(cur);
+  if (parts.length > maxParts) return [...parts.slice(0, maxParts - 1), `${parts[maxParts - 1]}\n…[transcript cut here]`];
+  return parts;
 }
 
 /**

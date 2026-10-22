@@ -73,6 +73,8 @@ function ensure(): void {
   // when it started composing a reply (0, a little early). See CallTimingStats.audioTimed.
   const cols = db.prepare('PRAGMA table_info(call_log)').all() as Array<{ name: string }>;
   if (!cols.some((c) => c.name === 'audio_timed')) db.exec('ALTER TABLE call_log ADD COLUMN audio_timed INTEGER');
+  // What was on the line, in order ("greeting → menu 0:11 → person 0:25").
+  if (!cols.some((c) => c.name === 'stages')) db.exec('ALTER TABLE call_log ADD COLUMN stages TEXT');
   ready = true;
 }
 
@@ -84,6 +86,8 @@ export interface CallLogEntry {
   review: CallReview | null; timing: CallTimingStats; echoes: number;
   menuLog: string[]; transcript: string; keep: boolean;
   conferenceSid?: string; twilioSid?: string;
+  /** The call's stages, from src/lib/call-stage.ts. */
+  stages?: string;
 }
 
 export function recordCall(e: CallLogEntry): number {
@@ -93,14 +97,14 @@ export function recordCall(e: CallLogEntry): number {
     (call_id, errand_id, action_id, target, phone, practice, duration_s, end_reason, bot_status,
      answered_by, verdict, goal_met, summary, learned, next_step,
      replies, median_reply_ms, max_reply_ms, talk_overs, echoes, first_words_ms,
-     menu, transcript, keep, conference_sid, twilio_sid, audio_timed)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+     menu, transcript, keep, conference_sid, twilio_sid, audio_timed, stages)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     e.callId, e.errandId ?? null, e.actionId ?? null, e.target, e.phone, e.practice ? 1 : 0,
     Math.round(e.durationS * 10) / 10, e.endReason, e.botStatus || null,
     r?.answeredBy ?? null, r?.verdict ?? null, r ? (r.goalMet ? 1 : 0) : null, r?.summary ?? null, r?.learned || null, r?.nextStep || null,
     e.timing.replies.length, e.timing.medianReplyMs, e.timing.maxReplyMs, e.timing.talkOvers, e.echoes, e.timing.firstWordsMs,
     e.menuLog.join('; ') || null, e.transcript || null, e.keep ? 1 : 0, e.conferenceSid ?? null, e.twilioSid ?? null,
-    e.timing.audioTimed ? 1 : 0,
+    e.timing.audioTimed ? 1 : 0, e.stages ?? null,
   ).lastInsertRowid as number;
   pruneTranscripts();
   return id;
@@ -121,6 +125,7 @@ export interface CallLogRow {
   first_words_ms: number | null; menu: string | null; transcript: string | null; conference_sid: string | null;
   twilio_sid: string | null; created_at: string;
   audio_timed?: number | null;
+  stages?: string | null;
 }
 
 export function listCalls(opts: { days?: number; includePractice?: boolean; errandId?: number } = {}): CallLogRow[] {
@@ -216,7 +221,17 @@ export function applyReview(result: CallResult, review: CallReview | null): Call
   if (!review) return result;
   const out: CallResult = { ...result, review };
   if (result.endedWithoutOutcome) {
-    if (review.answeredBy === 'person' && (review.verdict === 'progress' || review.verdict === 'goal_met' || review.learned)) {
+    // They confirmed it and said goodbye before the assistant's wrap-up landed (booked,
+    // "bye now", hung up). Done, if the checker agrees with the transcript.
+    if (review.answeredBy === 'person' && review.goalMet) {
+      out.status = 'done';
+      out.outcome = review.summary;
+    } else if (review.verdict === 'hung_up' && review.answeredBy === 'person') {
+      // They hung up on the intro ("Hello?", the AI intro, click): not a question for
+      // the owner. Move on to the next place; the review's notes still go in the log.
+      out.status = 'failed';
+      out.outcome = review.summary || 'They hung up right after the intro.';
+    } else if (review.answeredBy === 'person' && (review.verdict === 'progress' || review.verdict === 'goal_met' || review.learned)) {
       out.status = 'blocked';
       out.outcome = `The line ended before I wrapped up. ${review.summary}`.trim();
       out.followUp = review.nextStep || 'Tell me whether to call them back.';
