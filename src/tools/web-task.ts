@@ -217,6 +217,12 @@ export const desktopTool: ToolDef = {
     if (input.action === 'type' && (looksLikeCardNumber(String(input.text ?? '')) || /password/i.test(String(input.text ?? '')))) {
       return 'Refused: never type card numbers or passwords.';
     }
+    // The real mouse and keyboard are the owner's: never while they're using the Mac (looking is fine).
+    if (input.action !== 'screenshot') {
+      const { idleSeconds } = await import('../lib/takeover.js');
+      const idle = await idleSeconds();
+      if (idle != null && idle < 120) return 'Not now: the owner is using the Mac, and this would take over their mouse and keyboard. Return needs_owner info saying which window needs a click (e.g. "Chrome is asking to allow downloads; click Allow"), and the job waits for them.';
+    }
     const { computerUseTools, approveComputerUseTask } = await import('./computer-use.js');
     approveComputerUseTask('web-task-desktop');
     return computerUseTools[0].handler(input, { groupKey: 'web-task-desktop' });

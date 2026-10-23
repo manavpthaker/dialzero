@@ -38,7 +38,7 @@ import { getBotName, getOwner, getTimezone } from './config.js';
 import {
   createErrand, getErrand, updateErrand, getDueErrands, getErrandsInCall, getErrandsForCallback, addErrandEvent,
   getErrandEvents,
-  listErrands, countErrandCallsToday, getMemory, setMemory, proposeAction, confirmAction, markActionExecuting,
+  listErrands, countErrandCallsToday, countCallsToNumberToday, getMemory, setMemory, proposeAction, confirmAction, markActionExecuting,
   markActionDone, markActionFailed, findPersonByPhone, addCallNote, callNotesFor, saveFact,
   type Action, type ErrandRow, type CallNoteRow,
 } from './db.js';
@@ -51,6 +51,27 @@ const DEFAULT_MAX_CALLS = 4;
 const HARD_MAX_CALLS = 8;
 /** Attempts on one target before moving to the next. */
 const ATTEMPTS_PER_TARGET = 2;
+/** Real calls a day to any one business, across all errands. */
+const PER_BUSINESS_DAILY_CAP = () => num('ERRAND_PER_BUSINESS_DAILY_CAP', 2);
+
+// ── Do not call ───────────────────────────────────────────────────────────────────────────────────────────────────
+// A business that says "stop calling" / "take us off your list" is never dialed again
+// by any errand. Kept in memory ('do-not-call', key = 10 digits).
+
+const STOP_CALLING = /\b(stop calling|(do not|don'?t) call (us|here|this number|again)|take (us|me|this number) off|remove (us|me|this number) from|put (us|me) on (your|the) do.not.call|we'?re not interested,? (don'?t|do not) call)\b/i;
+
+/** Their words asked not to be called again. Exported for tests. */
+export function askedNotToCall(text: string): boolean { return STOP_CALLING.test(text); }
+
+export function isDoNotCall(phone: string): boolean {
+  const d = normalizePhone(phone);
+  return d.length === 10 && !!getMemory('do-not-call', d);
+}
+
+export function addDoNotCall(phone: string, business: string, why: string): void {
+  const d = normalizePhone(phone);
+  if (d.length === 10) setMemory('do-not-call', d, JSON.stringify({ business, why: why.slice(0, 200), at: new Date().toISOString() }));
+}
 const RETRY_GAP_MS = () => num('ERRAND_RETRY_GAP_MIN', 120) * 60_000;
 const DAILY_CALL_CAP = () => num('ERRAND_DAILY_CALL_CAP', 10);
 /** A dial that never connects within this is a no-answer (Twilio sends us nothing). */
@@ -194,6 +215,7 @@ export function prepareErrand(p: Record<string, unknown>): Prepared {
     if (!dial) return { error: `"${String(t.phone ?? '')}" (${name}) is not a US number the bot can call (emergency, premium, and short numbers are blocked).` };
     if (isFictionalNumber(dial)) return { error: `${name}'s number ${fmtPhone(dial)} is a made-up 555-01xx number. Find the real one (web_search / fetch_url) or ask the owner; never guess.` };
     if (ownerPhones().includes(normalizePhone(dial))) return { error: `${name}'s number is your own number.` };
+    if (isDoNotCall(dial)) return { error: `${name} (${fmtPhone(dial)}) asked not to be called again. Email them or find another way.` };
     // AI-voice calls to a person's cell need their prior consent (FCC 2024);
     // errands default to businesses. A known contact needs an explicit OK.
     const person = findPersonByPhone(dial);
@@ -598,6 +620,22 @@ export async function processErrand(id: number): Promise<void> {
     }
 
     const target = env.targets[row.target_idx];
+    if (!silentCall && isDoNotCall(target.phone)) {
+      addErrandEvent(id, 'note', `[t${row.target_idx}] ${target.name} asked not to be called; skipping it`);
+      updateErrand(id, { target_idx: row.target_idx + 1, next_check_at: sqlTime(new Date()) });
+      later(1_000, () => { void processErrand(id); });
+      return;
+    }
+    // Two real calls a day to one business, across every errand.
+    if (!silentCall && countCallsToNumberToday(target.phone) >= PER_BUSINESS_DAILY_CAP()) {
+      const at = nextCallingTime(new Date(Date.now() + 12 * 3600_000));
+      updateErrand(id, { next_check_at: sqlTime(at) });
+      if (!getErrandEvents(id, 30).some((e) => e.type === 'capped' && e.detail?.startsWith(`[t${row.target_idx}]`) && e.at?.startsWith(sqlTime(new Date()).slice(0, 10)))) {
+        addErrandEvent(id, 'capped', `[t${row.target_idx}] ${target.name} already called ${PER_BUSINESS_DAILY_CAP()}x today; next try ${fmtWhen(at)}`);
+        await progressUpdate(row, `${target.name} has had ${PER_BUSINESS_DAILY_CAP()} calls from me today, so I'll try again ${fmtWhen(at)}.`, true);
+      }
+      return;
+    }
     const brief = callBrief(row, env);
     const actionId = proposeAction({
       kind: 'call', tool_name: 'place_call',
@@ -670,6 +708,17 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
   ].filter(Boolean).join('\n');
   addErrandEvent(id, 'call_result', line + (extra ? `\n${extra}` : ''));
   recordCallNote(row, target, result);
+  // They asked not to be called again: never dial this number from any errand.
+  const theySaid = (result.transcriptTail ?? '').split('\n').filter((l) => l.startsWith('Them:')).join(' ');
+  if (!env.silent && askedNotToCall(theySaid)) {
+    addDoNotCall(target.phone, target.name, theySaid);
+    addErrandEvent(id, 'note', `[t${row.target_idx}] ${target.name} asked not to be called again: added to do-not-call`);
+    result = { ...result, status: 'failed', outcome: `${target.name} asked not to be called again, so I won't call them from any errand.` };
+  }
+  // Retry by why it failed: stuck in a menu → try the next place; a closed
+  // recording → tomorrow when they're open; a voicemail → give them a day to call back.
+  const verdict = result.review?.verdict;
+  if (result.status === 'retry_later' && verdict === 'menu_stuck') result = { ...result, status: 'failed' };
   updateErrand(id, { call_state: null, call_started_at: null });
   const fresh = getErrand(id)!;
 
@@ -720,7 +769,8 @@ export async function applyCallResult(id: number, result: CallResult): Promise<v
       }
       const moveOn = result.status === 'failed' || attemptsHere >= ATTEMPTS_PER_TARGET;
       if (moveOn) updateErrand(id, { target_idx: fresh.target_idx + 1 });
-      const gap = moveOn ? 60_000 : env.reply_mode ? 15 * 60_000 : RETRY_GAP_MS();
+      const waitDays = !moveOn && (verdict === 'closed' || result.status === 'voicemail');
+      const gap = moveOn ? 60_000 : waitDays ? 20 * 3600_000 : env.reply_mode ? 15 * 60_000 : RETRY_GAP_MS();
       updateErrand(id, { next_check_at: sqlTime(new Date(Date.now() + gap)) });
       later(gap + 1000, () => { void processErrand(id); });
       const nextTarget = env.targets[moveOn ? fresh.target_idx + 1 : fresh.target_idx];

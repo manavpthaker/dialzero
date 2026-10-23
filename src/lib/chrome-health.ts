@@ -41,7 +41,8 @@ const defaultDeps: ChromeHealthDeps = {
   connected: isBrowserConnected,
   version: async () => String(((await sendCommand('version', {}, 5000, true)) as { version?: string })?.version ?? ''),
   reload: async () => { await sendCommand('reload_extension', {}, 5000, true); },
-  openChrome: () => new Promise((resolve) => execFile(OPEN_BIN, ['-a', 'Google Chrome'], () => resolve())),
+  // -g: open it in the background, never over whatever the owner is working on.
+  openChrome: () => new Promise((resolve) => execFile(OPEN_BIN, ['-g', '-a', 'Google Chrome'], () => resolve())),
   expectedVersion: manifestVersion,
   jobsWaiting: () => [...getExecutingActions('web_task'), ...getExecutingActions('booking')].map((a) => a.summary),
   alert: async (text) => {

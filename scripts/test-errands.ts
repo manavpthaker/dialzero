@@ -349,6 +349,48 @@ try {
     assert.equal(row.target_idx, 1);
   });
 
+  await check('"stop calling" puts a number on do-not-call for every errand', async () => {
+    assert.equal(errands.askedNotToCall('Please stop calling this number.'), true);
+    assert.equal(errands.askedNotToCall("Take us off your list, we're not interested."), true);
+    assert.equal(errands.askedNotToCall('Call us back after 3.'), false);
+    const p = errands.prepareErrand({ ...base, targets: [{ name: 'Example Gutters', phone: '202-555-2177' }, base.targets[1]], max_calls: 4 });
+    if ('error' in p) throw new Error(p.error);
+    const id = db.createErrand({ action_id: null, goal: 'x', deadline: null, envelope_json: JSON.stringify(p.payload) });
+    db.addErrandEvent(id, 'dialing', '[t0] Example Gutters (202-555-2177), action #0');
+    await errands.applyCallResult(id, { status: 'retry_later', outcome: 'They declined.', followUp: '', transcriptTail: 'Bot: Hi, this is the assistant.\nThem: Stop calling us.' });
+    assert.equal(errands.isDoNotCall('(202) 555-2177'), true);
+    assert.equal(db.getErrand(id)!.target_idx, 1, 'on to the next place');
+    const again = errands.prepareErrand({ ...base, targets: [{ name: 'Example Gutters', phone: '202-555-2177' }] });
+    assert.ok('error' in again && /asked not to be called/.test(again.error));
+  });
+
+  await check('per-business count is across errands and skips practice calls', () => {
+    const a = db.createErrand({ action_id: null, goal: 'a', deadline: null, envelope_json: JSON.stringify({ goal: 'a', targets: [] }) });
+    const b = db.createErrand({ action_id: null, goal: 'b', deadline: null, envelope_json: JSON.stringify({ goal: 'b', targets: [] }) });
+    const pr = db.createErrand({ action_id: null, goal: 'p', deadline: null, envelope_json: JSON.stringify({ goal: 'p', targets: [], silent: true }) });
+    const before = db.countCallsToNumberToday('202-555-3001');
+    db.addErrandEvent(a, 'dialing', '[t0] Hardware (202-555-3001), action #1');
+    db.addErrandEvent(b, 'dialing', '[t0] Hardware (202-555-3001), action #2');
+    db.addErrandEvent(pr, 'dialing', '[t0] Hardware (202-555-3001), action #3');
+    assert.equal(db.countCallsToNumberToday('+12025553001') - before, 2);
+  });
+
+  await check('a stuck menu moves on; a voicemail waits a day for the callback', async () => {
+    const p = errands.prepareErrand({ ...base, max_calls: 6 });
+    if ('error' in p) throw new Error(p.error);
+    const stuck = db.createErrand({ action_id: null, goal: 'x', deadline: null, envelope_json: JSON.stringify(p.payload) });
+    db.addErrandEvent(stuck, 'dialing', '[t0] test, action #0');
+    await errands.applyCallResult(stuck, { status: 'retry_later', outcome: 'Menu only.', followUp: '', transcriptTail: '',
+      review: { answeredBy: 'menu', goalMet: false, verdict: 'menu_stuck', summary: 'Menu only.', learned: '', nextStep: '' } });
+    assert.equal(db.getErrand(stuck)!.target_idx, 1);
+    const vm = db.createErrand({ action_id: null, goal: 'x', deadline: null, envelope_json: JSON.stringify(p.payload) });
+    db.addErrandEvent(vm, 'dialing', '[t0] test, action #0');
+    await errands.applyCallResult(vm, { status: 'voicemail', outcome: 'Left a message.', followUp: '', transcriptTail: '' });
+    const next = Date.parse(`${db.getErrand(vm)!.next_check_at!.replace(' ', 'T')}Z`);
+    assert.ok(next - Date.now() > 19 * 3600_000, 'about a day, not two hours');
+    assert.equal(db.getErrand(vm)!.target_idx, 0);
+  });
+
   await check('a hang-up on the intro moves the errand on to the next number', async () => {
     const { applyReview } = await import('../src/call-log.js');
     const p = errands.prepareErrand({ ...base, max_calls: 4 });

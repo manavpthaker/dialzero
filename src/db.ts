@@ -3061,6 +3061,48 @@ export function upsertPerson(input: {
   return personId;
 }
 
+/**
+ * Fold duplicate people into one record: their emails, phones, facts, conversations and
+ * relationship history move to `keepId`, blank fields on the kept record are filled from
+ * them, and the duplicates are deleted. One transaction; returns what moved.
+ */
+export function mergePeople(keepId: number, dropIds: number[]): { merged: number; interactions: number; facts: number } {
+  const drops = dropIds.filter((id) => id !== keepId);
+  const out = { merged: 0, interactions: 0, facts: 0 };
+  db.transaction(() => {
+    if (!db.prepare('SELECT 1 FROM people WHERE id = ?').get(keepId)) throw new Error(`no person #${keepId}`);
+    for (const id of drops) {
+      const p = db.prepare('SELECT * FROM people WHERE id = ?').get(id) as Person & { last_contact: string | null } | undefined;
+      if (!p) continue;
+      db.prepare('UPDATE person_emails SET person_id = ? WHERE person_id = ?').run(keepId, id);
+      db.prepare('UPDATE person_phones SET person_id = ? WHERE person_id = ?').run(keepId, id);
+      out.interactions += db.prepare('UPDATE interactions SET person_id = ? WHERE person_id = ?').run(keepId, id).changes;
+      out.facts += db.prepare('UPDATE facts SET person_id = ? WHERE person_id = ?').run(keepId, id).changes;
+      db.prepare('UPDATE OR IGNORE relationship_events SET person_id = ? WHERE person_id = ?').run(keepId, id);
+      db.prepare('UPDATE OR IGNORE relationship_plans SET person_id = ? WHERE person_id = ?').run(keepId, id);
+      db.prepare(`UPDATE people SET company = COALESCE(company, ?), role = COALESCE(role, ?), linkedin_url = COALESCE(linkedin_url, ?),
+        relationship = COALESCE(relationship, ?), notes = COALESCE(notes, ?),
+        last_contact = CASE WHEN last_contact IS NULL OR last_contact < ? THEN ? ELSE last_contact END WHERE id = ?`)
+        .run(p.company ?? null, p.role ?? null, p.linkedin_url ?? null, p.relationship ?? null, p.notes ?? null, p.last_contact ?? '', p.last_contact ?? null, keepId);
+      db.prepare('DELETE FROM people WHERE id = ?').run(id);
+      out.merged++;
+    }
+  })();
+  return out;
+}
+
+/** Move the conversations (and facts) from given sources, e.g. "omi:<id>", from one person to another. */
+export function movePersonRecords(fromId: number, toId: number, refs: string[]): number {
+  let moved = 0;
+  db.transaction(() => {
+    for (const ref of refs) {
+      moved += db.prepare('UPDATE interactions SET person_id = ? WHERE person_id = ? AND ref = ?').run(toId, fromId, ref).changes;
+      db.prepare('UPDATE facts SET person_id = ? WHERE person_id = ? AND source_ref = ?').run(toId, fromId, ref);
+    }
+  })();
+  return moved;
+}
+
 export function findPersonByPhone(phone: string): Person | undefined {
   const p = normalizePhone(phone);
   if (!p) return undefined;
@@ -4719,6 +4761,17 @@ export function hasAssistantReplySince(iso: string): boolean {
   return !!db.prepare(
     `SELECT 1 FROM messages WHERE role = 'assistant' AND group_id != 'family' AND created_at >= ? LIMIT 1`
   ).get(toSqliteUtc(iso));
+}
+
+/** Real (not practice) dials to one number today, across all errands: the per-business cap. */
+export function countCallsToNumberToday(phone: string): number {
+  const d = normalizePhone(phone);
+  if (d.length !== 10) return 0;
+  const shown = `%(${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)})%`;
+  return (db.prepare(
+    `SELECT COUNT(*) AS n FROM errand_events e JOIN errands r ON r.id = e.errand_id
+     WHERE e.type = 'dialing' AND e.at >= ? AND e.detail LIKE ? AND COALESCE(json_extract(r.envelope_json, '$.silent'), 0) != 1`,
+  ).get(toSqliteDate(startOfTodayET()), shown) as { n: number }).n;
 }
 
 /**

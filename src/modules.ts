@@ -515,6 +515,7 @@ export const MODULES: ModuleSpec[] = [
       { key: 'ERRAND_CALL_END', example: '18', description: 'Latest hour to call businesses.' },
       { key: 'ERRAND_RETRY_GAP_MIN', example: '120', description: 'Minutes between retries of the same number.' },
       { key: 'ERRAND_DAILY_CALL_CAP', example: '10', description: 'Most errand calls per day.' },
+      { key: 'ERRAND_PER_BUSINESS_DAILY_CAP', example: '2', description: 'Most calls a day to any one business, across all errands.' },
       { key: 'WAKEUP_CALLS_ENABLED', example: 'true', featureSwitch: { defaultOn: true }, description: 'false = no wake-up calls.' },
       { key: 'WAKEUP_MAX_ATTEMPTS', example: '7', description: 'Wake-up call tries before giving up and texting.' },
       { key: 'WAKEUP_RETRY_MIN', example: '3', description: 'Minutes between wake-up tries.' },

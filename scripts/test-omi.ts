@@ -302,6 +302,35 @@ try {
     assert.ok(![sam, sam2].includes(omi.personIdFor('Sam')), 'two recent Sams: not guessed');
   });
 
+  await check('two recent Jordans: the one the owner talks to most, never a different Jordan with their own number', () => {
+    const at = (d: number) => new Date(now - d * 86_400_000).toISOString();
+    const lee = db.upsertPerson({ name: 'Jordan Lee' });
+    for (const d of [1, 2, 3, 5]) db.addInteraction({ person_id: lee, channel: 'email', summary: 'work', occurred_at: at(d) });
+    const park = db.upsertPerson({ name: 'Jordan Park' });
+    db.addInteraction({ person_id: park, channel: 'in-person', summary: 'met once', occurred_at: at(2) });
+    const other = db.upsertPerson({ name: 'Jordan', phones: ['+12025550142'] });
+    assert.equal(omi.personIdFor('Jordan'), lee);
+    db.addInteraction({ person_id: park, channel: 'in-person', summary: 'again', occurred_at: at(1) });
+    const guess = omi.personIdFor('Jordan');
+    assert.ok(![lee, park, other].includes(guess), 'close call: a new placeholder, not the Jordan with their own number');
+  });
+
+  await check('merging duplicates moves conversations, facts, emails and phones to one record', () => {
+    const keep = db.upsertPerson({ name: 'Casey Morgan', emails: ['casey@example.org'] });
+    const dup1 = db.upsertPerson({ name: 'Casey Dup' });
+    const dup2 = db.upsertPerson({ name: 'Casey Dup Two', phones: ['+12025550100'] });
+    db.addInteraction({ person_id: dup1, channel: 'in-person', summary: 'one-on-one', ref: 'omi:x', occurred_at: new Date(now).toISOString() });
+    db.addInteraction({ person_id: dup2, channel: 'imessage', summary: 'text', occurred_at: new Date(now).toISOString() });
+    const r = db.mergePeople(keep, [dup1, dup2]);
+    assert.deepEqual([r.merged, r.interactions], [2, 2]);
+    assert.equal(db.findPersonByPhone('+12025550100')?.id, keep);
+    assert.equal(db.getPersonById(dup1), undefined);
+    const other = db.upsertPerson({ name: 'Casey Elsewhere', phones: ['+12025550177'] });
+    db.addInteraction({ person_id: other, channel: 'in-person', summary: 'work check-in', ref: 'omi:work', occurred_at: new Date(now).toISOString() });
+    db.addInteraction({ person_id: other, channel: 'imessage', summary: 'their own text', ref: 'imessage:1', occurred_at: new Date(now).toISOString() });
+    assert.equal(db.movePersonRecords(other, keep, ['omi:work']), 1);
+  });
+
   await check('household members land on one record each, whatever Omi hears', () => {
     const dana = db.upsertPerson({ name: 'Dana Ellis' });
     db.upsertPerson({ name: 'Dana Keller' }); // someone else with the same first name

@@ -237,11 +237,19 @@ export function personIdFor(name: string): number {
     return exact?.id ?? upsertPerson({ name: n });
   }
   const household = householdPeople().map((x) => x.name.toLowerCase());
-  const full = q.prepare(`SELECT lower(p.name) AS name, p.id, max(i.occurred_at) AS last FROM people p LEFT JOIN interactions i ON i.person_id = p.id
-    WHERE lower(p.name) LIKE ? GROUP BY p.id ORDER BY last DESC`).all(`${low} %`) as Array<{ name: string; id: number; last: string | null }>;
+  const since = new Date(deps.now() - 60 * 86_400_000).toISOString().slice(0, 19).replace('T', ' ');
+  const full = q.prepare(`SELECT lower(p.name) AS name, p.id, max(i.occurred_at) AS last, sum(i.occurred_at >= ?) AS lately FROM people p LEFT JOIN interactions i ON i.person_id = p.id
+    WHERE lower(p.name) LIKE ? GROUP BY p.id ORDER BY lately DESC, last DESC`).all(since, `${low} %`) as Array<{ name: string; id: number; last: string | null; lately: number | null }>;
   const recent = full.filter((r) => household.includes(low) || (r.last && Date.parse(`${r.last.replace(' ', 'T')}Z`) >= deps.now() - 60 * 86_400_000));
   if (new Set(recent.map((r) => r.name)).size === 1) return recent[0].id;
-  const bare = q.prepare(`SELECT p.id FROM people p LEFT JOIN interactions i ON i.person_id = p.id WHERE lower(p.name) = ? GROUP BY p.id ORDER BY max(i.occurred_at) DESC, p.id LIMIT 1`).get(low) as { id: number } | undefined;
+  // Two recent people with that first name: the one the owner is in touch with far more often
+  // (a colleague over someone met once), rather than a stray bare-name record that's someone else.
+  const [top, next] = recent;
+  if (top && (top.lately ?? 0) >= 3 && (top.lately ?? 0) >= 3 * (next?.lately ?? 0)) return top.id;
+  // Otherwise an earlier bare-name placeholder, but never a bare record that's a real contact (its own email or phone).
+  const bare = q.prepare(`SELECT p.id FROM people p LEFT JOIN interactions i ON i.person_id = p.id WHERE lower(p.name) = ?
+    AND NOT EXISTS (SELECT 1 FROM person_emails e WHERE e.person_id = p.id) AND NOT EXISTS (SELECT 1 FROM person_phones f WHERE f.person_id = p.id)
+    GROUP BY p.id ORDER BY max(i.occurred_at) DESC, p.id LIMIT 1`).get(low) as { id: number } | undefined;
   return bare?.id ?? upsertPerson({ name: n });
 }
 

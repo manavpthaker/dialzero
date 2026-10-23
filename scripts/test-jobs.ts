@@ -326,6 +326,21 @@ try {
     assert.match(detail, /confirmation HB-77/);
   });
 
+  await check('"I didn\'t get a code" asks the site to resend it, instead of demanding the code', async () => {
+    const id = jobs.openJob('test_resend', 'Check the pharmacy scheduler', 'action:9902');
+    jobs.waitOnOwner(id, 'code', 'The pharmacy sent a code to your email. What is it?');
+    const out = await jobs.answerItem('pharmacy', 'I didn’t get a code');
+    assert.match(out, /resend/);
+    const job = db.getJob(id)!;
+    assert.equal(job.status, 'working');
+    assert.equal(job.waiting_for, 'info', 'never typed into the code box');
+    assert.match(job.answer ?? '', /resend/);
+    jobs.waitOnOwner(id, 'code', 'New code sent. What is it?');
+    await jobs.answerItem('pharmacy', 'It is 482913');
+    assert.equal(db.getJob(id)!.answer, '482913', 'a real code still goes through');
+    jobs.finishJob(id, 'done', 'ok');
+  });
+
   console.log(`\nJob tracker tests passed: ${passed} checks.`);
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

@@ -61,7 +61,8 @@ export async function callCheck(waitMs = 6 * 60_000): Promise<CallResult> {
     envelope_json: JSON.stringify({
       goal: 'CANARY practice call', deadline: null, targets: [{ name: 'Time announcement line', phone: TIME_LINE() }],
       share: '', window: '', max_calls: 1, keep_transcript: false, reply_mode: true, silent: true,
-      notes: ['It is a recording, not a person: say nothing, listen until you hear the time, then end_call with status "done" and the time as the outcome.'],
+      // The line announces UTC in words; a converted time ("12:52 PM") fails the checker.
+      notes: ['It is a recording, not a person: say nothing at all, listen until you hear the time, then end_call with status "done" and the outcome in the recording\'s own words, e.g. "At the tone, 12 hours, 20 minutes, Coordinated Universal Time". Do not convert it to another time zone or format.'],
     }),
   });
   const until = Date.now() + waitMs;

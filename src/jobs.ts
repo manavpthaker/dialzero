@@ -20,6 +20,8 @@ export type WaitNeed = 'login' | 'code' | 'link' | 'decision' | 'info';
 export type ItemStatus = 'waiting_on_you' | 'working' | 'watching';
 
 const CODE_TTL_MS = 10 * 60_000;
+/** "I didn't get a code" / "resend it": news for the job, not a code to type. */
+const NO_CODE = /\b(didn[’']?t|did not|never|haven[’']?t|have not|no|not)\b.{0,30}\b(get|got|gotten|receive|received|come|came|arrive|arrived|see|seeing|code|email|text|link)\b|\bresend\b|\bsend (it )?again\b/i;
 
 // ── Engine hooks ─────────────────────────────────────────────────────────────
 
@@ -276,6 +278,16 @@ export async function answerItem(whichText: string, answer: string): Promise<str
     return `The owner wants a call. Start it NOW with call_now (owner_request = their exact words): goal "${String(spec.goal ?? job.title)}", calling the office behind ${String(spec.to ?? '')} (look up their main number and hours with web_search; follow any timing they gave, e.g. "after 9"). Only say "calling" after call_now succeeds.`;
   }
   let stored = answer.trim();
+  // "I didn't get a code": ask the site to send it again (or by text) instead of
+  // demanding the code again.
+  if ((job.waiting_for === 'code' || job.waiting_for === 'link') && NO_CODE.test(answer) && !extractCode(answer) && !/https:\/\//.test(answer)) {
+    const what = job.waiting_for === 'code' ? 'code' : 'sign-in link';
+    patchJob(id, { answer: `The owner didn't get the ${what}. Click "resend" (or pick getting it by text or another method) and wait for the new one; if there's no way to resend, return needs_owner info and say what the page offers.`, answered_at: new Date().toISOString(), status: 'working', waiting_for: 'info' });
+    journal(id, 'answer', stored);
+    const resume = hooks[job.kind]?.resume;
+    if (resume) setTimeout(() => resume(getJob(id)!), 200);
+    return `They didn't get the ${what}; the job is asking the site to resend it. Tell them in one line.`;
+  }
   if (job.waiting_for === 'code') {
     const code = extractCode(answer);
     if (!code) return 'That job is waiting for a code, and their message has none. Ask them for the code in one line.';

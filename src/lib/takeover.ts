@@ -47,11 +47,25 @@ export function takeoverLine(host?: string | null, job?: { id: number; label: st
 }
 
 /** Put the job's tab in front so the owner lands on the right page. Best effort. */
+/** Seconds since anyone touched the Mac's keyboard or mouse (null if it can't tell). */
+export async function idleSeconds(): Promise<number | null> {
+  try {
+    const { execFile } = await import('node:child_process');
+    const out = await new Promise<string>((resolve) => execFile('/usr/sbin/ioreg', ['-c', 'IOHIDSystem', '-d', '4'], { timeout: 3000 }, (_e, so) => resolve(String(so ?? ''))));
+    const ns = out.match(/"HIDIdleTime" = (\d+)/)?.[1];
+    return ns ? Number(ns) / 1e9 : null;
+  } catch { return null; }
+}
+
 export async function showJobTab(): Promise<void> {
   try {
     const { quietCommandInGroupTab } = await import('../tools/browser.js');
     await quietCommandInGroupTab('booking', 'switch_tab', {});
   } catch { /* no tab: they'll find it */ }
+  // Bring Chrome to the front only when nobody is using the Mac (the owner is away,
+  // taking over from their phone): never over their work.
+  const idle = await idleSeconds();
+  if (idle == null || idle < 120) return;
   try {
     const { execFile } = await import('node:child_process');
     execFile(process.env.OPEN_BIN || '/usr/bin/open', ['-a', 'Google Chrome'], () => {});

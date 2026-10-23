@@ -112,6 +112,25 @@ async function handleAction(action, params) {
   }
 }
 
+// The assistant works in its own Chrome window, kept behind whatever the owner is doing.
+// Nothing here brings Chrome to the front or changes the tab the owner is looking at.
+async function botWindowId() {
+  const { botWindow } = await chrome.storage.session.get('botWindow');
+  if (botWindow) {
+    try { const w = await chrome.windows.get(botWindow); if (w && w.type === 'normal') return w.id; } catch { /* closed */ }
+  }
+  const w = await chrome.windows.create({ focused: false, state: 'normal', url: 'about:blank' });
+  await chrome.storage.session.set({ botWindow: w.id });
+  return w.id;
+}
+
+/** Show a tab inside the assistant's window only (never the owner's): activating it there disturbs nothing. */
+async function showInBotWindow(tab) {
+  const wid = await botWindowId();
+  if (tab.windowId === wid && !tab.active) await chrome.tabs.update(tab.id, { active: true });
+  return tab.windowId === wid;
+}
+
 async function getTab(tabId) {
   if (tabId) return await chrome.tabs.get(tabId);
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -195,7 +214,8 @@ async function doNavigate({ url, tabId, newTab }) {
   if (!url) return { error: 'url is required' };
   let tab;
   if (newTab) {
-    tab = await chrome.tabs.create({ url, active: false });
+    // In the assistant's own window, where making it the active tab disturbs nothing.
+    tab = await chrome.tabs.create({ url, windowId: await botWindowId(), active: true });
   } else {
     tab = await getTab(tabId);
     await chrome.tabs.update(tab.id, { url });
@@ -408,10 +428,23 @@ async function clickSnapshotIndex(tab, index, guard) {
 
 async function doScreenshot({ tabId }) {
   const tab = await getTab(tabId);
-  await chrome.tabs.update(tab.id, { active: true });
-  await chrome.windows.update(tab.windowId, { focused: true });
-  await sleep(400);
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 60 });
+  // DevTools captures the page itself, behind other windows and without focus; the visible-tab
+  // capture is the fallback, and only for a tab that's already showing.
+  const mine = await showInBotWindow(tab);
+  let dataUrl = null;
+  try {
+    const shot = await Promise.race([
+      cdp(tab.id, 'Page.captureScreenshot', { format: 'jpeg', quality: 60 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
+    ]);
+    if (shot && shot.data) dataUrl = `data:image/jpeg;base64,${shot.data}`;
+  } catch { /* fall back below */ }
+  if (!dataUrl) {
+    const now = await chrome.tabs.get(tab.id);
+    if (!now.active) return { error: mine ? 'Could not capture the page.' : "That tab is in the background of the owner's window; screenshots don't switch their tabs." };
+    await sleep(300);
+    dataUrl = await chrome.tabs.captureVisibleTab(now.windowId, { format: 'jpeg', quality: 60 });
+  }
   const [{ result: view }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => ({ w: innerWidth, h: innerHeight }) });
   // Scale to page (CSS) pixels so x,y read off the image are what click_at and
   // real_click expect, even on a 2x display.
@@ -908,9 +941,10 @@ async function doListTabs() {
 
 async function doSwitchTab({ tabId }) {
   if (!tabId) return { error: 'tabId is required' };
-  await chrome.tabs.update(tabId, { active: true });
+  // Inside the assistant's window only: switching a tab in the owner's window would change what they're looking at.
   const tab = await chrome.tabs.get(tabId);
-  return { switched: true, title: tab.title, url: tab.url };
+  const shown = await showInBotWindow(tab);
+  return { switched: shown, title: tab.title, url: tab.url };
 }
 
 // ── close_tab ──

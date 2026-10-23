@@ -1140,7 +1140,10 @@ function runCall(callId: string, call: PendingCall): void {
   let deadAir: ReturnType<typeof setTimeout> | undefined;
   const startTimers = (speakMs: number) => {
     if (call.kind !== 'errand' || inbound) return;
-    speakFirst = setTimeout(() => { if (!botSpoke && !ended && (!staged || stage.mayTalk)) send({ type: 'response.create' }); }, speakMs);
+    // The daily time-line check is listen-only: the line only beeps at first, so "speak
+    // first if they say nothing" talked over it.
+    const listenOnly = call.kind === 'errand' && !!call.practice && /\bCANARY\b/.test(call.goal);
+    speakFirst = setTimeout(() => { if (!botSpoke && !ended && !listenOnly && (!staged || stage.mayTalk)) send({ type: 'response.create' }); }, speakMs);
     deadAir = setTimeout(() => {
       if (!botSpoke && !ended) { console.warn(`[phone] ${callId}: nothing happened on the line, hanging up`); hangup(0, 'dead_air'); }
     }, onMenu ? 120_000 : 75_000);
