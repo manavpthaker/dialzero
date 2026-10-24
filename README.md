@@ -124,7 +124,7 @@ Your personal files (`.env`, `config/profile.json`, your own `context/` files an
 | "Call me" | Rings you right away, any hour you ask. It speaks first, picks up what you set up by text, and waits for you to finish instead of talking over you. Voicemail or a silent line gets a text instead. Its own calls to you keep your quiet hours. |
 | (a second phone number) | Optional: extra numbers that just forward calls (with the real caller ID) and texts to your cell. |
 | "Fill out this form in the Pages app" | Works the whole Mac, not just Chrome, for things outside the browser. One "go" covers the whole task, and if it runs out of steps it tells you what's done and what isn't. |
-| "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake. |
+| "Wake me up at 6:45" | Calls you and keeps you talking until you're actually awake, then goes through your day with you (calendar, clashes, what's due, what's waiting on you) and ends with a plan. |
 | "Hey Siri, ask Milo what's next" (whatever you named it) | Answers out loud from your iPhone, no Messages needed ([docs/VOICE.md](docs/VOICE.md)). |
 | "What did Sam and I talk about on Aug 12?" | Searches your texts by person (every number and email it has for them) and by date. |
 | "Ok, what about flights?" (days later) | Picks up the trip you were planning: it keeps a running record of each ongoing topic, so you never have to re-explain. |

@@ -520,7 +520,7 @@ export const MODULES: ModuleSpec[] = [
       { key: 'WAKEUP_MAX_ATTEMPTS', example: '7', description: 'Wake-up call tries before giving up and texting.' },
       { key: 'WAKEUP_RETRY_MIN', example: '3', description: 'Minutes between wake-up tries.' },
       { key: 'WAKEUP_GRACE_MIN', example: '60', description: 'Minutes late a wake-up call may still go out after a restart.' },
-      { key: 'WAKEUP_MAX_CALL_MIN', example: '5', description: 'Longest wake-up call, in minutes.' },
+      { key: 'WAKEUP_MAX_CALL_MIN', example: '15', description: 'Longest wake-up call, in minutes (it wakes you, then goes through your day).' },
     ],
     deps: [],
   },

@@ -29,7 +29,7 @@ const graceMs = () => num('WAKEUP_GRACE_MIN', 60) * 60_000;
 /** Twilio rings ~30s; a dial that never connects after this is a no-answer. */
 const ANSWER_TIMEOUT_MS = 2 * 60_000;
 /** A connected call with no result after this is treated as ended without confirming. */
-const connectedTimeoutMs = () => (num('WAKEUP_MAX_CALL_MIN', 5) + 2) * 60_000;
+const connectedTimeoutMs = () => (num('WAKEUP_MAX_CALL_MIN', 15) + 2) * 60_000;
 const TICK_MS = 30_000;
 
 export const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
@@ -44,6 +44,8 @@ export interface WakeUpDeps {
   dial: (w: WakeCallInfo) => Promise<void>;
   notify: (row: WakeUpCallRow, text: string) => Promise<void>;
   firstEvent: (now: Date) => Promise<string | undefined>;
+  /** What the call should know about today (morning.ts). */
+  morning: (now: Date) => Promise<string>;
 }
 
 const defaultDeps: WakeUpDeps = {
@@ -57,6 +59,7 @@ const defaultDeps: WakeUpDeps = {
     });
   },
   firstEvent: firstCalendarItem,
+  morning: async (now) => (await import('./morning.js')).morningBriefing(now),
 };
 let deps: WakeUpDeps = defaultDeps;
 export function setWakeUpDeps(d: Partial<WakeUpDeps>): void { deps = { ...deps, ...d }; }
@@ -301,13 +304,22 @@ export async function recordAttempt(id: number, attempt: number, outcome: 'awake
   console.log(`[wakeup] #${id}: ${outcome}; retrying in ${Math.round((retryAfterMs ?? retryMs()) / 1000)}s`);
 }
 
+const morningCache = new Map<string, string>();
+
 async function attemptCall(row: WakeUpCallRow, now: Date): Promise<void> {
   const attempt = row.attempts_today + 1;
   updateWakeUpCall(row.id, { attempts_today: attempt, last_attempt_at: now.toISOString(), call_state: 'calling', next_attempt_at: null });
   const firstEvent = await deps.firstEvent(now).catch(() => undefined);
+  // The owner's day, gathered once a morning (retries reuse it), so the call can go through it with them.
+  const cycle = row.cycle_date ?? etParts(now).ymd;
+  let context = morningCache.get(`${row.id}:${cycle}`);
+  if (context === undefined) {
+    context = await Promise.race([deps.morning(now), new Promise<string>((r) => setTimeout(() => r(''), 12_000))]).catch(() => '');
+    morningCache.set(`${row.id}:${cycle}`, context);
+  }
   const info: WakeCallInfo = {
     id: row.id, attempt, timeLabel: fmtTime(etParts(now).hhmm),
-    ...(row.note ? { note: row.note } : {}), ...(firstEvent ? { firstEvent } : {}),
+    ...(row.note ? { note: row.note } : {}), ...(firstEvent ? { firstEvent } : {}), ...(context ? { context } : {}),
   };
   try {
     console.log(`[wakeup] #${row.id}: calling (attempt ${attempt}/${maxAttempts()})`);

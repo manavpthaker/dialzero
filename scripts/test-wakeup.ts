@@ -27,6 +27,7 @@ wake.setWakeUpDeps({
   dial: async (w) => { dialed.push(w); if (dialError) throw dialError; },
   notify: async (row, text) => { told.push({ id: row.id, text }); },
   firstEvent: async () => 'Standup at 9:30 AM',
+  morning: async () => '',
 });
 
 let passed = 0;
@@ -37,6 +38,38 @@ async function check(name: string, fn: () => void | Promise<void>) {
 }
 
 const at = (iso: string) => new Date(iso);
+
+// The morning context the call gets (morning.ts), with no live sources.
+const morning = await import('../src/morning.js');
+await check('the morning call knows the day: schedule, clashes, list, waiting', () => {
+  const text = morning.morningText({
+    schedule: [
+      { title: 'Delivery window', start: '2026-10-23T13:00:00Z', end: '2026-10-24T01:00:00Z', allDay: false },
+      { title: 'Dentist', start: '2026-10-23T16:00:00Z', end: '2026-10-23T17:00:00Z', allDay: false },
+      { title: 'Roof inspection', start: '2026-10-23T16:15:00Z', end: '2026-10-23T17:00:00Z', allDay: false, where: '1 Example St' },
+    ],
+    priorities: [{ title: 'Renew the car registration', why: 'overdue' }],
+    waiting: [{ title: 'Book the plumber', ask: 'Which morning works?' }],
+  });
+  assert.match(text, /: Roof inspection \(1 Example St\)/);
+  assert.match(text, /Clashes to sort out: .*Dentist overlaps .*Roof inspection\./);
+  assert.doesNotMatch(text, /Delivery window overlaps/, 'a long window is not a clash');
+  assert.match(text, /Top of the list:\n- Renew the car registration \(overdue\)/);
+  assert.match(text, /Waiting on the owner's answer:\n- Book the plumber: Which morning works\?/);
+});
+
+await check('the same event twice counts once, and is no clash with itself', () => {
+  const ev = morning.dedupe([
+    { title: 'Furnace Service', start: '2026-10-23', allDay: true },
+    { title: 'Furnace Service', start: '2026-10-23T16:00:00Z', end: '2026-10-23T17:00:00Z', allDay: false },
+    { title: 'Furnace Service appointment', start: '2026-10-23T16:00:00Z', end: '2026-10-23T17:00:00Z', allDay: false },
+    { title: 'School drop-off', start: '2026-10-23T16:00:00Z', end: '2026-10-23T16:15:00Z', allDay: false },
+  ]);
+  assert.deepEqual(ev.map((e) => e.title), ['Furnace Service', 'School drop-off']);
+  assert.equal(ev[0].allDay, false, 'the timed one is kept');
+  assert.equal(morning.clashes(ev).length, 1);
+  assert.match(morning.clashes(ev)[0], /Furnace Service overlaps .*School drop-off/);
+});
 const idOf = (msg: string) => Number(msg.match(/#(\d+)/)?.[1]);
 const row = (id: number) => db.getWakeUpCall(id)!;
 const min = 60_000;

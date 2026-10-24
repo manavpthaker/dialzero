@@ -67,7 +67,7 @@ const NONCE_TTL_MS = 3 * 60_000;
 const BLOCKED_PREFIXES = ['1911', '1988', '1900', '1976'];
 
 /** A wake-up call (src/wakeup.ts). `attempt` lets a late result be told apart from the current one. */
-export type WakeCallInfo = { id: number; attempt: number; timeLabel: string; note?: string; firstEvent?: string };
+export type WakeCallInfo = { id: number; attempt: number; timeLabel: string; note?: string; firstEvent?: string; context?: string };
 type OwnerCall = { kind: 'owner'; reason?: string; wake?: WakeCallInfo; twilioSid?: string };
 export type ErrandCall = {
   kind: 'errand'; actionId: number; to: string; name: string | null;
@@ -202,7 +202,8 @@ let wakeHooks: WakeCallHooks | null = null;
 export function setWakeCallHooks(h: WakeCallHooks): void { wakeHooks = h; }
 /** Real spoken answers needed (plus confirm_awake) before a wake-up call counts. */
 const WAKE_MIN_ANSWERS = 2;
-const WAKE_MAX_CALL_MS = Number(env('WAKEUP_MAX_CALL_MIN', '5')) * 60_000;
+// Long enough to wake the owner and then go through the day together.
+const WAKE_MAX_CALL_MS = Number(env('WAKEUP_MAX_CALL_MIN', '15')) * 60_000;
 const WAKE_FILLER = new Set([
   'yeah', 'yea', 'yes', 'yep', 'yup', 'ok', 'okay', 'mhm', 'hmm', 'huh', 'hey', 'hello', 'nah', 'nope',
   'sure', 'fine', 'good', 'what', 'right', 'alright', 'thanks', 'awake', 'the', 'and', 'just', 'yah',
@@ -671,6 +672,35 @@ function wakeSessionConfig(w: WakeCallInfo) {
   const bot = getBotName();
   const owner = getOwner().name;
   const { object: them, possessive: their } = ownerRef().pronouns;
+  const confirmTool = {
+    type: 'function', name: 'confirm_awake',
+    description: `Call when ${owner} has answered at least ${WAKE_MIN_ANSWERS} questions out loud with real answers and sounds awake. Returns whether that is confirmed.`,
+    parameters: { type: 'object', properties: {}, required: [] },
+  };
+  // With the day in hand: wake the owner, then go through it together.
+  if (w.context) return {
+    instructions: [
+      `You are ${bot}, ${owner}'s personal assistant. This is the wake-up call ${owner} asked for instead of an alarm. It is ${w.timeLabel}.`,
+      `Two jobs, in order: wake ${owner} up by getting ${them} talking, then go through ${their} day with ${them} like a chief of staff would, so ${owner} starts it with a plan.`,
+      `Open with a warm "Good morning" and the time in one short sentence, plus one easy line to get ${them} talking (how ${owner} slept). Then say you'll walk through today.`,
+      `What you know about ${their} day:\n${w.context}`,
+      w.note ? `${owner} left a note for this morning: "${w.note}". Bring it up early.` : '',
+      [
+        `Go through it one thing at a time, in the order the day happens, and ask something real about each so ${owner} answers out loud:`,
+        `the first thing on the schedule and how ${owner} is getting there or ready for it; any clash, and which one to move or skip; the top of the list and when ${owner} will do it;`,
+        `anything waiting on ${their} answer (get the answer).`,
+        `Keep each turn to a sentence or two. Do not read the list out. Skip anything ${owner} says is handled.`,
+      ].join(' '),
+      `When ${owner} decides something (move a meeting, add a task, a reminder, answer a waiting question, text someone), call ask_assistant with exactly what ${owner} said so it gets done, then confirm in a few words. Say "one sec" while it works.`,
+      `If ${owner} asks about anything else (email, a person, the weather), call ask_assistant and give the answer.`,
+      `If you hear a voicemail greeting, a recording, or a beep, that is NOT ${owner}: call hang_up right away without leaving a message.`,
+      `A single "yeah", "ok", "I'm up", or a mumble does not count. If ${owner} is still sleepy, keep it light and ask again.`,
+      `Once ${owner} has given at least ${WAKE_MIN_ANSWERS} real spoken answers and sounds awake, call confirm_awake. If it says not yet, keep going.`,
+      `Do not stop at confirm_awake: finish going through the day unless ${owner} says they're good. Then give a one-line plan for the morning ("so: drop-off at 7:45, the dentist at 8:15, then...") and call hang_up.`,
+      'Friendly, upbeat, short spoken sentences. No lists, no markdown.',
+    ].filter(Boolean).join('\n'),
+    tools: [askAssistantTool(), confirmTool, HANG_UP_TOOL],
+  };
   return {
     instructions: [
       `You are ${bot}, ${owner}'s personal assistant. This is the wake-up call ${owner} asked for instead of an alarm. It is ${w.timeLabel}.`,
@@ -689,15 +719,7 @@ function wakeSessionConfig(w: WakeCallInfo) {
       `If ${owner} asks about ${their} day (calendar, tasks, email, anything), call ask_assistant with ${their} words and tell ${them} the answer. Say a short filler like "one sec" while it works.`,
       'Friendly, upbeat, short spoken sentences. No lists, no markdown.',
     ].join('\n'),
-    tools: [
-      askAssistantTool(),
-      {
-        type: 'function', name: 'confirm_awake',
-        description: `Call when ${owner} has answered at least ${WAKE_MIN_ANSWERS} questions out loud with real answers and sounds awake. Returns whether that is confirmed.`,
-        parameters: { type: 'object', properties: {}, required: [] },
-      },
-      HANG_UP_TOOL,
-    ],
+    tools: [askAssistantTool(), confirmTool, HANG_UP_TOOL],
   };
 }
 
@@ -1530,7 +1552,7 @@ function runCall(callId: string, call: PendingCall): void {
         wakeConfirmAsked = true;
         // Transcription can trail the audio by a turn; the count is rechecked when the call ends.
         output = isAwake()
-          ? 'Confirmed awake. Say a quick upbeat send-off, then call hang_up.'
+          ? (wake.context ? 'Confirmed awake. Keep going through the day together (unless they say they are good); when you have covered it, give a one-line plan and call hang_up.' : 'Confirmed awake. Say a quick upbeat send-off, then call hang_up.')
           : `Not yet: ${wakeAnswers} real spoken answer(s) so far, ${WAKE_MIN_ANSWERS} needed. Ask another simple question the owner has to answer out loud.`;
       } else if (ev.name === 'hang_up' && wake && !isAwake() && !wakeHangUpRefused) {
         // Refused once only, so a voicemail or a determined owner can still end it.
