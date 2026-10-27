@@ -64,6 +64,10 @@ try {
     const without = phone.errandSessionConfig(base);
     assert.ok(!(without.tools as Array<{ name: string }>).some((t) => t.name === 'check_with_owner'));
     assert.match(without.instructions, /call them back/);
+    const practice = phone.errandSessionConfig({ ...base, errandId: 9, conf: { token: 't', name: 'n' }, practice: true });
+    assert.ok(!(practice.tools as Array<{ name: string }>).some((t) => t.name === 'check_with_owner' || t.name === 'bring_in_owner'), 'practice calls never ask the owner');
+    assert.match(withNet.instructions, /pick it yourself, the earliest that fits/);
+    assert.ok(phone.HOLD_LINE_GAP_MS <= 8_000, 'a "still there?" while the owner is asked gets an answer');
   });
 
   await check('a call the owner took over is done without the transcript checker', async () => {

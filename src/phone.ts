@@ -835,6 +835,8 @@ function receptionSessionConfig(call: ErrandCall) {
  * over them, their voice cut it off, and it restarted the intro; most hung up.
  */
 export const PICKUP_SPEAK_MS = 3_000;
+/** While the assistant waits on the owner mid-call, the least time between "still checking" lines. */
+export const HOLD_LINE_GAP_MS = 6_000;
 
 /**
  * Line echo: phone lines send the assistant's own voice back, and the realtime session
@@ -912,7 +914,8 @@ export function errandSessionConfig(call: ErrandCall, opts: { introduced?: boole
   const callback = callbackNumber();
   const recorded = env('PHONE_RECORD_CALLS', 'false') === 'true';
   // The assistant can ask the owner or ring them in, on assistant-first conference calls for an errand.
-  const safetyNet = !call.callback && !!call.conf && !!call.errandId && env('PHONE_SAFETY_NET', 'true') !== 'false';
+  // Never on practice calls: they must not text the owner, and the scene fails waiting for an answer.
+  const safetyNet = !call.callback && !call.practice && !!call.conf && !!call.errandId && env('PHONE_SAFETY_NET', 'true') !== 'false';
   const returning = call.callback
     ? [
       `${call.name || 'A business'} is calling you back: they are returning your earlier call on behalf of ${full}. Answer the phone first: "Hi, this is ${bot}, ${full}'s assistant. Thanks for calling back." Then pick up where things left off.`,
@@ -940,7 +943,7 @@ export function errandSessionConfig(call: ErrandCall, opts: { introduced?: boole
       `Wait quietly on hold. Answer their questions only with the details above; if you do not know something, say you will check with ${owner} and get back to them.`,
       `If they ask whether you are a real person or a robot, say plainly that you are an AI assistant working for ${owner}. Never claim to be ${owner} or a human.`,
       safetyNet
-        ? `${owner} is reachable while you call. If they ask something only ${owner} can answer (a decision, a detail you weren't given, OK on a price or a time), say "Let me check, one moment" and call check_with_owner with the question; then tell them the answer. If they ask to speak with ${owner}, say "Sure, let me connect you, one moment" and call bring_in_owner.`
+        ? `${owner} is reachable while you call. If they offer choices and one fits your goal (a time in the window you were given, or any time when none was given), pick it yourself, the earliest that fits, and don't ask ${owner}. Only when nothing above settles it (a decision, a detail you weren't given, OK on a price or a charge), first SAY out loud "Let me check, one moment", then call check_with_owner with the question; then tell them the answer. If they ask to speak with ${owner}, say "Sure, let me connect you, one moment" and call bring_in_owner.`
         : `If they ask to speak with ${owner} directly, say ${owner} isn't available right now but you can have ${owner} call them back, and ask for the best number and time. Put that in follow_up.`,
       `Never give out card numbers, bank details, Social Security numbers, passwords, or PINs. Never agree to a charge, contract, cancellation fee, or anything beyond the goal; say ${owner} will confirm.`,
       // FCC 47 CFR 64.1200(b): an artificial-voice message names who it's from and gives a number to call back.
@@ -1124,7 +1127,7 @@ function runCall(callId: string, call: PendingCall): void {
   let voicemailLeft = false;
   let sentMessageKey = false;
   // src/call-safety-net.ts: ask the owner, or ring them in, on staged errand calls.
-  const netKey = staged && errandCall?.errandId ? `errand:${errandCall.errandId}` : '';
+  const netKey = staged && errandCall?.errandId && !errandCall.practice ? `errand:${errandCall.errandId}` : '';
   const whoCalled = errandCall ? (errandCall.name || errandCall.to) : '';
   let askPending = false;
   let ownerRinging = false;
@@ -1220,9 +1223,10 @@ function runCall(callId: string, call: PendingCall): void {
   const respond = () => {
     if (ended) return;
     if (talking) { respondAfterDone = true; return; }
-    // Waiting on the owner's answer, or for them to pick up: one short line now and then, nothing more.
+    // Waiting on the owner's answer, or for them to pick up: a short line when they talk, nothing more.
+    // With 20s between lines, "Are you still there?" got silence and the other side hung up.
     if (askPending || ownerRinging) {
-      if (Date.now() - lastHoldLine > 20_000) {
+      if (Date.now() - lastHoldLine > HOLD_LINE_GAP_MS) {
         lastHoldLine = Date.now();
         send({ type: 'response.create', response: { instructions: `Say only: "${askPending ? 'Still checking, one moment.' : 'Connecting you now, one moment.'}"` } });
       }
