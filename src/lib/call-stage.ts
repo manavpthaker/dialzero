@@ -11,6 +11,12 @@ export type Stage = 'greeting' | 'person' | 'menu' | 'hold' | 'voicemail' | 'rec
 const VOICEMAIL = /\b(leave (a |your |us a )?(brief |short )?(message|name)|after the (tone|beep)|at the (tone|beep)|record your message|voice ?mail|mailbox|(is |are )?not available (to take|right now)|can'?t (come to|take) (the|your) (phone|call)|unable to (come to the phone|take your call)|away from the (phone|desk))\b/i;
 const MENU = /\b(press (\d|star|pound)|(say|press) (yes|no|one|two)\b|if (this|that) is correct|to continue in english|para espa|for [^.?!]{1,60}, (press|dial|say)|(please )?say or (press|enter)|(please )?enter (your|the) [^.?!]{1,40}(number|code|extension)|if you know your party'?s extension|dial (by name|the extension)|main menu|(our )?menu options have changed|to repeat (these|this|the) options?)\b/i;
 const HOLD = /\b(please (hold|stay on the line|continue to hold)|your call is (very )?important|all (of )?our [^.?!]{0,30}(agents|representatives|associates|team members|staff)[^.?!]{0,30} (are|is) (busy|currently|with|assisting|helping)|next available|estimated (wait|hold) time|in (the )?queue|you are (caller )?number \d|thank you for (your )?(patience|waiting)|while (you|we) (wait|hold|connect)|transferring your call|one moment while)\b/i;
+/**
+ * A person passing the call on ("Let me transfer you over to the correct department"):
+ * hold until the next person picks up, who gets a fresh short opener (answering it,
+ * or pressing keys mid-transfer, left the next person hearing two turns in a row).
+ */
+const TRANSFER = /\b((let me|i'?ll|i will|i'?m going to|gonna|i can) (transfer|connect) you|(let me|i'?ll|i will|i'?m going to|gonna|i can) put you (through|on hold)|transfer(ring)? you (over|to|now)|put(ting)? you through)\b/i;
 const CLOSED = /\b((we are|we'?re|the office is|our office is|the store is) (currently )?closed|our (business |office |normal )?hours are|outside (of )?(our )?(normal |business )?hours|during (normal |regular )?business hours)\b/i;
 /** A live person, not a recording: greetings, questions back, names. */
 const PERSON = /\b(hello\??|hi|hey|yes|yeah|speaking|this is [a-z]+|how (can|may) i help|what can i (do|help)|thanks for (holding|waiting)|good (morning|afternoon|evening)|can i help|who'?s calling|go ahead|sorry\??)\b/i;
@@ -31,7 +37,7 @@ export function classifyLine(text: string): Stage | null {
   if (MENU.test(t)) return 'menu';
   // A person coming back from hold says "thanks for holding", which isn't hold.
   if (/\bthanks? (you )?for (holding|waiting)\b/i.test(t)) return 'person';
-  if (HOLD.test(t)) return 'hold';
+  if (HOLD.test(t) || TRANSFER.test(t)) return 'hold';
   if (CLOSED.test(t)) return 'recording';
   if (PERSON.test(t)) return 'person';
   return null;

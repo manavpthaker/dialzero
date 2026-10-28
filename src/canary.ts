@@ -11,7 +11,7 @@
 // Opt-in (CANARY_ENABLED=true): the practice call is a real call and costs a little each day.
 
 import { scheduleCron } from './lib/cron.js';
-import { createErrand, getErrand, getErrandEvents, getMemory, setMemory } from './db.js';
+import { createErrand, getErrand, getErrandEvents, getMemory, listErrands, setMemory, updateErrand } from './db.js';
 import { sendInterrupt } from './cos-outbound.js';
 import { todayET } from './lib/time-et.js';
 import { lastCallFor } from './call-log.js';
@@ -54,6 +54,45 @@ export function practiceSpeech(errandId: number): string | null {
   return (log.transcript ?? '').split('\n').filter((l) => /^\[[\d:]+\] Bot: /.test(l)).map((l) => l.replace(/^\[[\d:]+\] Bot: /, '')).join(' ');
 }
 
+const sqlNow = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+/**
+ * A check's errand is over once the check has its answer, however the call went. Left
+ * alone, a failed check sat in "waiting" for good: the checker turning down the
+ * assistant's claim makes the runner wait on the owner, and a dial that never
+ * connected used up the check's only call.
+ */
+export function closeCheck(id: number, r: CallResult): CallResult {
+  const row = getErrand(id);
+  if (row && (row.status === 'active' || row.status === 'waiting')) {
+    updateErrand(id, {
+      status: r.ok ? 'done' : 'failed', call_state: null, call_started_at: null, next_check_at: null,
+      outcome: `Morning check: ${r.ok ? 'pass' : 'fail'} (${r.detail.replace(/\s+/g, ' ')})`.slice(0, 500), finished_at: sqlNow(),
+    });
+  }
+  return r;
+}
+
+/**
+ * Checks left open by earlier runs (before closeCheck), or by a restart mid-check. Only
+ * silent CANARY/PRACTICE errands at least an hour old; a live call is left alone.
+ */
+export function closeStaleChecks(now = Date.now()): number {
+  let n = 0;
+  for (const row of listErrands({ open: true, limit: 200 })) {
+    let silent = false;
+    try { silent = (JSON.parse(row.envelope_json) as { silent?: boolean }).silent === true; } catch { /* not ours */ }
+    const age = now - Date.parse(`${(row.created_at ?? '').replace(' ', 'T')}Z`);
+    if (!silent || !/^(CANARY|PRACTICE)\b/.test(row.goal) || row.call_state || !(age > 3600_000)) continue;
+    updateErrand(row.id, {
+      status: 'failed', next_check_at: null, finished_at: sqlNow(),
+      outcome: `Check closed later; it had stopped at: ${row.outcome ?? row.status}`.slice(0, 500),
+    });
+    n++;
+  }
+  return n;
+}
+
 export async function callCheck(waitMs = 6 * 60_000): Promise<CallResult> {
   const id = createErrand({
     action_id: null, deadline: null,
@@ -71,7 +110,7 @@ export async function callCheck(waitMs = 6 * 60_000): Promise<CallResult> {
     const row = getErrand(id);
     if (row && row.status !== 'active') {
       const last = getErrandEvents(id, 10).find((e) => e.type === 'call_result' || e.type === 'phone_down' || e.type === 'blocked');
-      if (row.status !== 'done') return { ok: false, detail: last?.detail ?? row.outcome ?? row.status };
+      if (row.status !== 'done') return closeCheck(id, { ok: false, detail: last?.detail ?? row.outcome ?? row.status });
       const said = practiceSpeech(id);
       if (said === null) return { ok: true, detail: row.outcome ?? 'done' };
       return said
@@ -79,7 +118,9 @@ export async function callCheck(waitMs = 6 * 60_000): Promise<CallResult> {
         : { ok: true, quiet: true, detail: row.outcome ?? 'done' };
     }
   }
-  return { ok: false, detail: 'no result within 6 minutes (the call never started or never ended)' };
+  // A dial the voice service turned down is retried by the runner, not counted: say so.
+  const down = getErrandEvents(id, 10).find((e) => e.type === 'phone_down');
+  return closeCheck(id, { ok: false, detail: down?.detail ?? 'no result within 6 minutes (the call never started or never ended)' });
 }
 
 export async function webCheck(dayIndex = Math.floor(Date.now() / 86_400_000)): Promise<(Result & { site: string }) | null> {
@@ -122,6 +163,10 @@ export async function runMorningCheck(): Promise<{ call: CallResult | null; web:
 
 export function startCanary(): void {
   if (process.env.CANARY_ENABLED !== 'true') return;
+  try {
+    const closed = closeStaleChecks();
+    if (closed) console.log(`[canary] closed ${closed} practice check(s) left open by earlier runs`);
+  } catch (err) { console.error('[canary] closing old checks failed:', err); }
   const expr = process.env.CANARY_CRON || '20 8 * * *';
   scheduleCron(expr, () => { runMorningCheck().catch((err) => console.error('[canary] failed:', err)); });
   // `npm run canary` sets this flag; the check runs here, in the process that owns

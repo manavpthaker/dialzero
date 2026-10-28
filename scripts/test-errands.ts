@@ -81,14 +81,19 @@ try {
     assert.equal(phone.isFictionalNumber('+12125552368'), false);
   });
 
-  await check('opener: wait out their greeting, one sentence saying AI (and recorded), no "Hi, yes!"', () => {
+  await check('opener: wait out their greeting, who in six words then a plain short question, no "Hi, yes!"', () => {
     assert.ok(phone.PICKUP_SPEAK_MS >= 2_500, 'speak-first after pickup must outlast a normal greeting');
-    const rule = phone.openerRule('Assistant', 'Alex Rivera', true);
+    const rule = phone.openerRule('Assistant', 'Alex Rivera');
     assert.match(rule, /let them finish their greeting/);
-    assert.match(rule, /"Hi, this is Assistant, Alex Rivera's AI assistant, on a recorded line\. <your question>\?"/);
+    assert.match(rule, /"Hi, this is Assistant, Alex Rivera's assistant\. <one plain question, under 10 words>\?"/);
+    assert.match(rule, /no sizes, measurements/);
     assert.match(rule, /Never say "thanks for holding"/);
     assert.doesNotMatch(rule, /Hi, yes/, 'the "Hi, yes!" rule turned into restarts and echo loops');
-    assert.doesNotMatch(phone.openerRule('Assistant', 'Alex Rivera', false), /recorded/, 'no recording notice when nothing is recorded');
+    assert.doesNotMatch(rule, /recorded|\bAI\b/, 'no "AI assistant, on a recorded line" up front');
+    assert.match(phone.openerRule('Assistant', 'Alex Rivera', { notice: true }), /Alex Rivera's assistant, on a recorded line\./, 'notice kept where everyone must consent');
+    assert.match(phone.openerRule('Assistant', 'Alex Rivera', { ai: true }), /Alex Rivera's AI assistant\./, 'PHONE_OPENER_AI puts it back');
+    const line = "Hi, this is Assistant, Alex Rivera's assistant. Do you have wooden garden gates ready for pickup?";
+    assert.match(phone.openerRule('Assistant', 'Alex Rivera', { line }), /exactly this, word for word, and nothing more: "Hi, this is Assistant, Alex Rivera's assistant\. Do you have wooden garden gates/);
     assert.doesNotMatch(phone.conversationRule(), /Hi, yes|introduce/i);
     assert.match(phone.afterIntroRule(), /ALREADY introduced yourself.*Never introduce yourself again/s);
   });
@@ -98,8 +103,8 @@ try {
     const call = { kind: 'errand' as const, actionId: 1, to: '+17325552142', name: 'Example Auto', personId: null, goal: 'Book an oil change', context: 'Name: Alex Rivera', keepTranscript: false };
     const first = phone.errandSessionConfig(call).instructions;
     const later = phone.errandSessionConfig(call, { introduced: true }).instructions;
-    assert.match(first, /Your first turn is ONE sentence/);
-    assert.doesNotMatch(later, /Your first turn is ONE sentence/);
+    assert.match(first, /Your first turn is two short sentences/);
+    assert.doesNotMatch(later, /Your first turn is/);
     assert.match(later, /ALREADY introduced yourself/);
     assert.match(first, /ONE QUESTION PER TURN/);
     assert.match(later, /ONE QUESTION PER TURN/, 'the conversation rules stay');

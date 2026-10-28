@@ -87,6 +87,7 @@
     "test:reception": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-reception.ts",
     "test:takeover": "ASSISTANT_TIMEZONE=America/New_York tsx scripts/test-takeover.ts",
     "test:call-states": "tsx scripts/test-call-states.ts",
+    "test:call-opener": "tsx scripts/test-call-opener.ts",
     "test:safety-net": "tsx scripts/test-safety-net.ts",
     "test:stall-watch": "tsx scripts/test-stall-watch.ts",
     "stalls": "tsx scripts/stalls.ts",

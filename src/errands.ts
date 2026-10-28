@@ -651,6 +651,7 @@ export async function processErrand(id: number): Promise<void> {
       const sid = await placeErrandCall({
         errandId: id, actionId, to: target.phone, name: target.name,
         goal: brief.goal, context: brief.context, keepTranscript: env.keep_transcript, practice: !!env.silent,
+        askGoal: env.goal,
       });
       if (sid) addErrandEvent(id, 'twilio', sid);
     } catch (err) {
@@ -851,8 +852,8 @@ export async function applyCallbackResult(id: number, caller: string, result: Ca
   await tellOwner(getErrand(id) ?? row, 'callback', text);
 }
 
-/** Calls whose result never arrived: a dial that never connected, or a dropped call. */
-async function sweepStuckCalls(): Promise<void> {
+/** Calls whose result never arrived: a dial that never connected, or a dropped call. `callInfo` is swapped in tests. */
+export async function sweepStuckCalls(callInfo: typeof twilioCallInfo = twilioCallInfo): Promise<void> {
   const now = Date.now();
   for (const row of getErrandsInCall()) {
     const started = row.call_started_at ? new Date(`${row.call_started_at}Z`).getTime() : 0;
@@ -863,9 +864,11 @@ async function sweepStuckCalls(): Promise<void> {
       // Their side answered but the assistant's voice never joined = our phone link
       // is down (e.g. the tunnel is off, so the business hears silence).
       const sid = getErrandEvents(row.id, 20).find((e) => e.type === 'twilio')?.detail ?? '';
-      const info = sid ? await twilioCallInfo(sid) : null;
+      const info = sid ? await callInfo(sid) : null;
       if (info && ['queued', 'ringing', 'in-progress'].includes(info.status) && now - started < 15 * 60_000) continue;
       if (info && info.status === 'completed' && info.duration > 0) { await phoneDown(row); continue; }
+      // Assistant-first: the leg that failed is the assistant's own, to the voice service; the business was never rung.
+      if (info && info.status === 'failed' && info.to.startsWith('sip:')) { await voiceServiceDown(row); continue; }
       const outcome = info?.status === 'busy' ? 'The line was busy.'
         : info?.status === 'failed' ? "The call didn't go through."
           : 'No answer.';
@@ -891,6 +894,32 @@ async function phoneDown(row: ErrandRow): Promise<void> {
   // Stop every errand from dialing for an hour: each try is a business hearing silence.
   setMemory('errands', 'voice_down_until', String(Date.now() + 60 * 60_000));
   await phoneLinkAlert(`${target?.name ?? 'a business'} picked up and heard silence`);
+}
+
+const VOICE_RETRY_MS = 15 * 60_000;
+
+/**
+ * The assistant's own leg to the voice service failed before the business was dialed
+ * (assistant-first calls ring OpenAI's SIP address first). Counting each as a call that
+ * "didn't go through" used up an errand's calls. Like a dead phone link now: not counted,
+ * dials pause 15 minutes, and the owner hears once per outage (silent practice errands
+ * don't text).
+ */
+async function voiceServiceDown(row: ErrandRow): Promise<void> {
+  const envl = envelopeOf(row);
+  const target = envl.targets[row.target_idx];
+  const dial = getErrandEvents(row.id, 50).find((e) => e.type === 'dialing');
+  const aid = Number(dial?.detail?.match(/action #(\d+)/)?.[1]);
+  if (aid) markActionFailed(aid, "The assistant's line to the voice service failed; the business was never dialed.");
+  updateErrand(row.id, {
+    call_state: null, call_started_at: null, calls_made: Math.max(0, row.calls_made - 1),
+    next_check_at: sqlTime(new Date(Date.now() + VOICE_RETRY_MS)),
+  });
+  addErrandEvent(row.id, 'phone_down', `[t${row.target_idx}] ${target?.name}: the assistant's line to the voice service failed before they were dialed. Not counted.`);
+  setMemory('errands', 'voice_down_until', String(Date.now() + VOICE_RETRY_MS));
+  if (notifyOverride || envl.silent) return;
+  setMemory('errands', 'voice_alerted', '1');
+  await updateOwner('voice-service', "⚠️ Calls aren't connecting right now: the voice service (OpenAI) turned down the assistant's line. Calls wait and retry on their own. If it lasts, check platform.openai.com → Settings → Webhooks and Send test event.", { milestone: true, source: 'errands' });
 }
 
 // ── Phone link health (Tailscale Funnel carries the OpenAI + Twilio webhooks) ──
@@ -984,6 +1013,10 @@ export function startErrands(): void {
   setErrandCallHooks({
     onConnected: (id) => {
       setMemory('errands', 'voice_down_until', '');
+      if (getMemory('errands', 'voice_alerted') === '1') {
+        setMemory('errands', 'voice_alerted', '');
+        void updateOwner('voice-service', "✅ Calls are connecting again.", { milestone: true, source: 'errands' });
+      }
       updateErrand(id, { call_state: 'connected' });
       addErrandEvent(id, 'connected');
     },

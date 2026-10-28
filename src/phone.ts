@@ -33,7 +33,8 @@ import {
   lookupCaller, connectDecision, deliverMessage, logConnected, logDeclined, type ReceptionCaller,
 } from './reception.js';
 import { CallTimeline } from './lib/call-timing.js';
-import { ReplyGate } from './lib/reply-gate.js';
+import { ReplyGate, endsTurn, isPresenceCheck } from './lib/reply-gate.js';
+import { needsRecordingNotice, openerLine, whoLine, writeOpenerAsk } from './lib/call-opener.js';
 import { CallStage, isGoodbye, sendMessageKey } from './lib/call-stage.js';
 import { MenuNav } from './menu-nav.js';
 import { openAsk, registerLiveCall, unregisterLiveCall, callsChanged } from './call-safety-net.js';
@@ -92,6 +93,11 @@ export type ErrandCall = {
   history?: string[];
   /** The daily practice call: logged as practice, kept out of the real numbers. */
   practice?: boolean;
+  /**
+   * The first words to a person, written before the dial (src/lib/call-opener.ts):
+   * "Hi, this is Sam, Alex Rivera's assistant. Do you sell wooden garden gates?"
+   */
+  opener?: string;
   /** Someone else called the assistant's number: it acts as the receptionist (src/reception.ts). */
   reception?: {
     caller: ReceptionCaller;
@@ -469,6 +475,11 @@ async function pressKeysInConference(call: ErrandCall, digits: string): Promise<
   const c = call.conf ? confs.get(call.conf.token) : undefined;
   if (!c?.sid) throw new Error('no conference to play the keys into');
   await twilioPost(`Conferences/${c.sid}.json`, { AnnounceUrl: rawStepUrl('dtmf', call.conf!.token, `&d=${encodeURIComponent(digits)}`), AnnounceMethod: 'POST' });
+}
+
+/** Tests only: an assistant-first conference as placeErrandCall sets it up, so a call carrying `token` is staged. */
+export function stageConferenceForTest(token: string): void {
+  confs.set(token, { nonce: 'test', name: `bot-${token}`, sipStarted: true, expires: Date.now() + 60_000, dialTo: '+17325550000' });
 }
 
 /** Tests only: stage a transfer as if connectOwner had redirected the caller. */
@@ -853,9 +864,22 @@ export function isEcho(heard: string, botSaid: string): boolean {
   return h.filter((w) => said.has(w)).length / h.length >= 0.75;
 }
 /** Business calls (not reception, barge-in off) answer turns through the echo guard. PHONE_ECHO_GUARD=false turns it off. */
-function echoGuardOn(call: PendingCall): boolean {
+function echoGuardOn(call: OwnerCall | ErrandCall): boolean {
   return call.kind === 'errand' && !call.reception && env('PHONE_BARGE_IN', 'false') !== 'true' && env('PHONE_ECHO_GUARD', 'true') !== 'false';
 }
+/**
+ * Business calls through the conference where the call code keeps the stage (step 4,
+ * src/lib/call-stage.ts): menus and hold are handled in code, and the assistant only speaks to
+ * a person or after a voicemail beep. Needs their words transcribed.
+ */
+function isStaged(call: OwnerCall | ErrandCall): boolean {
+  return call.kind === 'errand' && echoGuardOn(call) && !call.callback && !!call.conf && confs.has(call.conf.token)
+    && env('PHONE_CALL_STAGES', 'true') !== 'false' && env('PHONE_TRANSCRIBE_THEM', 'true') !== 'false';
+}
+/** "AI assistant" in the opener itself (PHONE_OPENER_AI=true). Off: it says so whenever asked. */
+const openerSaysAI = () => env('PHONE_OPENER_AI', 'false') === 'true';
+const recordingCalls = () => env('PHONE_RECORD_CALLS', 'false') === 'true';
+
 /** How long after the assistant's estimated last word a heard turn can still be its echo. */
 const ECHO_TAIL_MS = 1_500;
 /** Rough speaking pace for estimating when the assistant's audio stops playing. */
@@ -863,16 +887,19 @@ const MS_PER_BOT_WORD = 380;
 
 /**
  * The opener for outbound errand calls (exported for tests). Calls tended to die in
- * the first seconds because the old rules fought each other ("introduce yourself
- * once" next to "say 'Hi, yes!' if talked over"), so the assistant restarted and
- * repeated itself. Now one sentence that says who it is, that it's an AI, that the
- * line is recorded (when it is), and ends on the question; "introduce once" is
- * enforced by the call code (afterIntroRule swaps in once it has been said).
+ * the first seconds: the old rules fought each other ("introduce yourself once" next
+ * to "say 'Hi, yes!' if talked over"), and "AI assistant, on a recorded line" plus a
+ * long question got hung up on. Now who it is in six words, then a plain question;
+ * the line is written before the call when it can be (`line`, src/lib/call-opener.ts),
+ * and "introduce once" is enforced by the call code (afterIntroRule).
  */
-export function openerRule(bot: string, full: string, recorded: boolean): string {
-  const line = recorded ? ', on a recorded line' : '';
+export function openerRule(bot: string, full: string, o: { ai?: boolean; notice?: boolean; line?: string } = {}): string {
+  const who = whoLine(bot, full, o);
+  const first = o.line
+    ? `Your first turn is exactly this, word for word, and nothing more: "${o.line}"`
+    : `Your first turn is two short sentences, about 15 words in all: "${who} <one plain question, under 10 words>?" The question carries only the ask; no sizes, measurements, model numbers, addresses or dates beyond the day (those come once they say yes). For example: "${who} Do you have a table for four tomorrow at 7?"`;
   return `The line is silent until they pick up; say nothing before that. When they answer, let them finish their greeting; never talk over it. If they pick up and say nothing, speak first.
-Your first turn is ONE sentence that ends on your question, about 20 words: "Hi, this is ${bot}, ${full}'s AI assistant${line}. <your question>?" For example: "Hi, this is ${bot}, ${full}'s AI assistant${line}. Do you have a table for four tomorrow at 7?" Never "calling for ${full}" (it sounds like you're looking for them there). Then stop talking and wait for their answer. Never say "thanks for holding" unless they actually put you on hold.`;
+${first} Never "calling for ${full}" (it sounds like you're looking for them there). Then stop talking and wait for their answer. Never say "thanks for holding" unless they actually put you on hold.`;
 }
 
 /** Once the assistant has introduced itself: never again, only a short repair (exported for tests). */
@@ -882,7 +909,9 @@ export function afterIntroRule(): string {
 
 /** How the conversation goes after the opener (exported for tests). */
 export function conversationRule(): string {
-  return `Give the details one at a time as they ask (day, time, party size, name), not all at once. Short turns, like a person on the phone.
+  return `Give the details one at a time as they ask (day, time, party size, name, sizes), not all at once. Short turns, like a person on the phone: one or two sentences, under about 15 words.
+TAKE A NO: if they don't have it or don't do it ("no", "we're wholesale only", "we don't carry that"), believe them. Don't rephrase the question or push. Thank them, ask one quick follow-up only if it clearly helps ("Any idea who might?"), then end_call with status "failed" and what they said.
+If they say they'll transfer you or put you through, say at most "Thanks!" and wait. Whoever picks up next hasn't heard you: give them your short opener again.
 ONE QUESTION PER TURN: ask one thing, then stop talking and wait for their full answer before the next. Never stack questions in one breath (a hotel desk got four questions at once and the call ended with none answered). Let them finish: if they pause mid-thought, wait for them to go on. Sound like a friendly person, not a checklist: react to what they say ("oh perfect, thank you", "got it"), let small talk happen, and work the next question in naturally. If an answer already covers a later question, don't ask it. If what answers is a recording that says they're closed or gives their hours, don't leave a long message: end_call with status "retry_later" and put the hours in follow_up.`;
 }
 
@@ -912,7 +941,10 @@ export function errandSessionConfig(call: ErrandCall, opts: { introduced?: boole
   const full = o.fullName || o.name;
   const bot = getBotName();
   const callback = callbackNumber();
-  const recorded = env('PHONE_RECORD_CALLS', 'false') === 'true';
+  const recorded = recordingCalls();
+  // Menus and hold are worked by the call code: the voice model gets no keypad of its own
+  // (it once pressed a key while a person was transferring the call).
+  const staged = isStaged(call);
   // The assistant can ask the owner or ring them in, on assistant-first conference calls for an errand.
   // Never on practice calls: they must not text the owner, and the scene fails waiting for an answer.
   const safetyNet = !call.callback && !call.practice && !!call.conf && !!call.errandId && env('PHONE_SAFETY_NET', 'true') !== 'false';
@@ -934,14 +966,19 @@ export function errandSessionConfig(call: ErrandCall, opts: { introduced?: boole
         ? /message|voice ?mail|leave|record/i.test(call.menuLog.at(-1) ?? '')
           ? `This call is already in progress. You chose the option to leave a message (${call.menuLog.join('; ')}). After the beep, or as soon as it goes quiet, leave your one short message now, then call end_call with status "voicemail".`
           : `This call is already in progress. You are working through their automated phone menu; so far: ${call.menuLog.join('; ')}. Listen to what comes next. Only introduce yourself once a person answers or a voicemail beep sounds. If no one comes on after a while, say your message anyway: it may be recording.`
-        : opts.introduced ? afterIntroRule() : openerRule(bot, full, recorded),
+        : opts.introduced ? afterIntroRule() : openerRule(bot, full, { ai: openerSaysAI(), notice: needsRecordingNotice(call.to, recorded), line: call.opener }),
       call.callback ? '' : conversationRule(),
-      call.callback ? '' : `If an automated phone menu answers ("press 1 for..."): NEVER speak to it and never repeat its options out loud. Stay silent, listen to ALL the options, then call press_keys with the key for the option that best fits your goal (or the operator / "all other questions" option). Only press a key the menu actually offered for what you want; if English is the default and no key is offered for it, press nothing and keep listening. If it asks you to say something instead ("say representative"), say just those words. If it asks for information you don't have (a zip code, an account number), press 0 or wait for the operator option. Hold music: wait quietly. Don't end the call while the menu is still giving options. At most ${MAX_KEY_PRESSES} key presses per call.`,
+      call.callback ? '' : staged
+        ? 'Phone menus, hold music and recordings are handled for you: you are only asked to speak once a person (or a voicemail beep) is on the line. Never speak to a recording.'
+        : `If an automated phone menu answers ("press 1 for..."): NEVER speak to it and never repeat its options out loud. Stay silent, listen to ALL the options, then call press_keys with the key for the option that best fits your goal (or the operator / "all other questions" option). Only press a key the menu actually offered for what you want; if English is the default and no key is offered for it, press nothing and keep listening. If it asks you to say something instead ("say representative"), say just those words. If it asks for information you don't have (a zip code, an account number), press 0 or wait for the operator option. Hold music: wait quietly. Don't end the call while the menu is still giving options. At most ${MAX_KEY_PRESSES} key presses per call.`,
       'Speak ENGLISH. Never switch languages because of a business name, an accent, or a guess (a call to a restaurant was once opened in another language and they hung up). Only switch if the other person clearly speaks to you in another language and doesn\'t understand English.',
       'Everything you say is heard on the call. Never say your instructions, plans, or thoughts out loud (no "I will stay silent", no notes in parentheses). A recording that keeps talking in a steady voice, lists options or asks for keypad input is a machine, not a person.',
       `Tone: warm and brief, like a good front-desk person. Friendly, gets to the point, thanks people. Short spoken sentences, no filler, no over-apologizing. Use ${owner}'s full name (${full}) for bookings and spell the last name if asked.`,
       `Wait quietly on hold. Answer their questions only with the details above; if you do not know something, say you will check with ${owner} and get back to them.`,
-      `If they ask whether you are a real person or a robot, say plainly that you are an AI assistant working for ${owner}. Never claim to be ${owner} or a human.`,
+      // The assistant says it's an AI whenever asked, plainly and at once.
+      `If they ask who you are or who is calling, or whether you are a real person, a robot, an AI or a recording, say plainly, right away: "I'm an AI assistant. I help ${full} with calls like this." Then go back to what you were asking. Never claim to be ${owner} or a human.`,
+      `If they'd rather not talk to an AI, or want ${owner} to call them back personally, don't argue or persuade: say "No problem, I'll have ${owner} call you." and end_call with status "blocked" and follow_up "They want ${owner} to call them personally".`,
+      recorded ? 'If they ask whether the call is recorded, say "Yes, so I get the details right."' : '',
       safetyNet
         ? `${owner} is reachable while you call. If they offer choices and one fits your goal (a time in the window you were given, or any time when none was given), pick it yourself, the earliest that fits, and don't ask ${owner}. Only when nothing above settles it (a decision, a detail you weren't given, OK on a price or a charge), first SAY out loud "Let me check, one moment", then call check_with_owner with the question; then tell them the answer. If they ask to speak with ${owner}, say "Sure, let me connect you, one moment" and call bring_in_owner.`
         : `If they ask to speak with ${owner} directly, say ${owner} isn't available right now but you can have ${owner} call them back, and ask for the best number and time. Put that in follow_up.`,
@@ -963,7 +1000,7 @@ export function errandSessionConfig(call: ErrandCall, opts: { introduced?: boole
       type: 'function', name: 'bring_in_owner',
       description: `Ring ${owner} into this call because they asked to talk to ${owner}. Say "Sure, let me connect you, one moment" first; when ${owner} picks up you'll be told to hand over.`,
       parameters: { type: 'object', properties: { reason: { type: 'string', description: 'One line for the owner\'s text: who wants them and why.' } }, required: ['reason'] },
-    }] : []), ...(call.callback ? [] : [{
+    }] : []), ...(call.callback || staged ? [] : [{
       type: 'function', name: 'press_keys',
       description: 'Press keys on an automated phone menu. Use only when a recording asks you to press a key. The line pauses for a second while the keys are sent, then you keep listening.',
       parameters: {
@@ -1115,8 +1152,7 @@ function runCall(callId: string, call: PendingCall): void {
   // menu is worked by the code (src/menu-nav.ts) and hold is waited out in silence.
   const errandCall = call.kind === 'errand' ? call : null;
   // Needs their words transcribed (PHONE_TRANSCRIBE_THEM), since the words decide the stage.
-  const staged = echoGuardOn(call) && !!firstConf && !!errandCall && !errandCall.callback
-    && env('PHONE_CALL_STAGES', 'true') !== 'false' && env('PHONE_TRANSCRIBE_THEM', 'true') !== 'false';
+  const staged = isStaged(call);
   const stage = new CallStage();
   const menu = new MenuNav(errandCall?.goal ?? '');
   let lastCommitted = '';
@@ -1163,12 +1199,22 @@ function runCall(callId: string, call: PendingCall): void {
   };
   let speakFirst: ReturnType<typeof setTimeout> | undefined;
   let deadAir: ReturnType<typeof setTimeout> | undefined;
+  // The assistant's turn. The first time it speaks to a person it's the opener written
+  // before the dial, word for word (src/lib/call-opener.ts), so it stays short however
+  // the model feels; after that, the session's own rules.
+  const reply = () => {
+    if (errandCall?.opener && !introduced && !errandCall.callback && (!staged || stage.stage === 'person' || stage.stage === 'greeting')) {
+      send({ type: 'response.create', response: { instructions: `${errandSessionConfig(errandCall).instructions}\nYOUR TURN NOW: your first words to them. Unless they just asked you to hold or wait (then say only "Sure."), say exactly this and nothing more: "${errandCall.opener}"` } });
+      return;
+    }
+    send({ type: 'response.create' });
+  };
   const startTimers = (speakMs: number) => {
     if (call.kind !== 'errand' || inbound) return;
     // The daily time-line check is listen-only: the line only beeps at first, so "speak
     // first if they say nothing" talked over it.
     const listenOnly = call.kind === 'errand' && !!call.practice && /\bCANARY\b/.test(call.goal);
-    speakFirst = setTimeout(() => { if (!botSpoke && !ended && !listenOnly && (!staged || stage.mayTalk)) send({ type: 'response.create' }); }, speakMs);
+    speakFirst = setTimeout(() => { if (!botSpoke && !ended && !listenOnly && (!staged || stage.mayTalk)) reply(); }, speakMs);
     deadAir = setTimeout(() => {
       if (!botSpoke && !ended) { console.warn(`[phone] ${callId}: nothing happened on the line, hanging up`); hangup(0, 'dead_air'); }
     }, onMenu ? 120_000 : 75_000);
@@ -1217,11 +1263,30 @@ function runCall(callId: string, call: PendingCall): void {
   let recentBot: string[] = [];
   let echoes = 0;
   let respondAfterDone = false;
+  // Their turns that started while the assistant was talking, and what each one said.
+  const overBot = new Set<string>();
+  const heardText = new Map<string, string>();
+  let covered = 0;
   const suspect = new Set<string>();
   const echoIds = new Set<string>();
   const waiting = new Map<string, ReturnType<typeof setTimeout>>();
   const respond = () => {
     if (ended) return;
+    // Their last turn's words decide what happens (menu? voicemail? a person? just
+    // "hello?"): wait for its transcript, up to 2.5s. Answering first is how an intro
+    // went to a menu.
+    if (staged && lastCommitted && !transcribed.has(lastCommitted) && !askPending && !ownerRinging) {
+      owedReply = true;
+      clearTimeout(owedTimer);
+      owedTimer = setTimeout(() => { if (owedReply) { owedReply = false; transcribed.add(lastCommitted); respond(); } }, 2_500);
+      return;
+    }
+    // "Hello?" said over the assistant's reply (or just before it) is answered by that
+    // reply. Answering it again made two turns in a row.
+    if (staged && lastCommitted && (overBot.has(lastCommitted) || talking || Date.now() < botEndsAt) && isPresenceCheck(heardText.get(lastCommitted) ?? '')) {
+      covered++;
+      return;
+    }
     if (talking) { respondAfterDone = true; return; }
     // Waiting on the owner's answer, or for them to pick up: a short line when they talk, nothing more.
     // With 20s between lines, "Are you still there?" got silence and the other side hung up.
@@ -1233,14 +1298,6 @@ function runCall(callId: string, call: PendingCall): void {
       return;
     }
     if (staged) {
-      // Their last turn's words decide the stage (menu? voicemail? a person?): wait for
-      // its transcript, up to 2.5s. Answering first is how the intro went to a menu.
-      if (lastCommitted && !transcribed.has(lastCommitted)) {
-        owedReply = true;
-        clearTimeout(owedTimer);
-        owedTimer = setTimeout(() => { if (owedReply) { owedReply = false; transcribed.add(lastCommitted); respond(); } }, 2_500);
-        return;
-      }
       if (stage.stage === 'menu') { void navigateMenu(); return; }
       if (stage.stage === 'hold') return;
       if (closingOwed && stage.stage === 'person' && errandCall) {
@@ -1260,7 +1317,7 @@ function runCall(callId: string, call: PendingCall): void {
         return;
       }
     }
-    send({ type: 'response.create' });
+    reply();
   };
   const navigateMenu = async () => {
     if (!errandCall || menuBusy || ended) return;
@@ -1360,7 +1417,7 @@ function runCall(callId: string, call: PendingCall): void {
   }
   // A finished turn waits a beat, and the assistant holds back if they keep talking (src/lib/reply-gate.ts).
   const gate = new ReplyGate(respond, Number(env('PHONE_YIELD_MS', '700')));
-  const settle = (itemId: string, echo: boolean) => {
+  const settle = (itemId: string, echo: boolean, heard = '') => {
     const t = waiting.get(itemId);
     if (!t) return;
     clearTimeout(t);
@@ -1369,7 +1426,7 @@ function runCall(callId: string, call: PendingCall): void {
       echoes++;
       echoIds.add(itemId);
       send({ type: 'conversation.item.delete', item_id: itemId });
-    } else gate.turnEnded();
+    } else gate.turnEnded(staged && endsTurn(heard) ? 0 : undefined);
   };
   const onEchoGuardEvent = (ev: Record<string, any>) => {
     const now = Date.now();
@@ -1384,6 +1441,7 @@ function runCall(callId: string, call: PendingCall): void {
       if (respondAfterDone) { respondAfterDone = false; setTimeout(() => respond(), 0); }
     } else if (ev.type === 'input_audio_buffer.speech_started' && ev.item_id) {
       clearTimeout(greetingQuiet); // the voicemail greeting isn't over yet
+      if (now < botEndsAt) overBot.add(String(ev.item_id));
       if (now < botEndsAt + ECHO_TAIL_MS) suspect.add(String(ev.item_id));
       else {
         gate.theyStarted();
@@ -1398,7 +1456,7 @@ function runCall(callId: string, call: PendingCall): void {
       // No transcript in time: treat it as them, as before.
       waiting.set(id, setTimeout(() => settle(id, false), 2_500));
     } else if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.item_id && suspect.has(String(ev.item_id))) {
-      settle(String(ev.item_id), isEcho(String(ev.transcript ?? ''), recentBot.join(' ')));
+      settle(String(ev.item_id), isEcho(String(ev.transcript ?? ''), recentBot.join(' ')), String(ev.transcript ?? ''));
     } else if (ev.type === 'conversation.item.input_audio_transcription.failed' && ev.item_id) {
       settle(String(ev.item_id), false);
     }
@@ -1475,7 +1533,12 @@ function runCall(callId: string, call: PendingCall): void {
         } else if (stage.line(String(ev.transcript)) === 'menu' && !voicemailLeft) menu.heard(String(ev.transcript));
         if (stage.stage === 'person' && !status && isGoodbye(String(ev.transcript))) closingOwed = true;
       }
-      if (ev.item_id) markTranscribed(String(ev.item_id));
+      if (ev.item_id) {
+        heardText.set(String(ev.item_id), String(ev.transcript).trim());
+        markTranscribed(String(ev.item_id));
+        // A question, "Hello?" or "this is Dana" hands the line back: answer now, not after the beat.
+        if (staged && String(ev.item_id) === lastCommitted && endsTurn(String(ev.transcript))) gate.now();
+      }
       if (wake && isRealWakeAnswer(String(ev.transcript))) wakeAnswers++;
     } else if (ev.type === 'response.created' || ev.type === 'input_audio_buffer.speech_started') {
       if (ev.type === 'input_audio_buffer.speech_started') {
@@ -1607,6 +1670,7 @@ function runCall(callId: string, call: PendingCall): void {
     clearTimeout(owedTimer);
     clearTimeout(greetingQuiet);
     if (gate.yields) console.log(`[phone] ${callId}: held back ${gate.yields}x while they kept talking`);
+    if (covered) console.log(`[phone] ${callId}: ${covered} "hello?" said over the assistant's reply, not answered twice`);
     if (netKey) unregisterLiveCall(netKey);
     if (staged && stage.changes.length) console.log(`[phone] ${callId}: stages ${stage.path()}`);
     if (handedOff) {
@@ -1972,18 +2036,37 @@ export async function runPlaceCall(action: Action): Promise<{ outcome: string; a
   return { outcome: `Calling ${(p.name as string) || to} now. I'll tell you how it went.`, actual_cost_cents: 0 };
 }
 
+/**
+ * The opener for a business call, written before the dial (src/lib/call-opener.ts), or
+ * undefined when it couldn't be (the prompt's own opener rule takes over). The listen-only
+ * time-line check says nothing, so it gets none. Exported for tests.
+ */
+export async function openerFor(goal: string, to: string): Promise<string | undefined> {
+  if (/\bCANARY\b/.test(goal)) return undefined;
+  const ask = await writeOpenerAsk(goal);
+  if (!ask) return undefined;
+  const o = getOwner();
+  return openerLine(getBotName(), o.fullName || o.name, ask, { ai: openerSaysAI(), notice: needsRecordingNotice(to, recordingCalls()) });
+}
+
 /** Dial one errand step. The result comes back through setErrandCallHooks. */
 export async function placeErrandCall(c: {
   errandId: number; actionId: number; to: string; name: string | null; goal: string; context: string; keepTranscript: boolean;
   practice?: boolean;
+  /** The errand's goal on its own (no call history), for writing the opener. */
+  askGoal?: string;
 }): Promise<string> {
   if (!isPhoneConfigured()) throw new Error('phone calling is not configured');
   const to = toDialable(c.to);
   if (!to) throw new Error(`"${c.to}" is not a dialable US number`);
+  // Written before the nonce is minted, so the model's few seconds don't eat into its life.
+  const opener = await openerFor(c.askGoal || c.goal, to);
+  if (opener) console.log(`[phone] errand #${c.errandId} opener: "${opener}"`);
   const nonce = mintNonce({
     kind: 'errand', actionId: c.actionId, to, goal: c.goal, context: c.context,
     name: c.name, personId: null, keepTranscript: c.keepTranscript, errandId: c.errandId,
     ...(c.practice ? { practice: true } : {}),
+    ...(opener ? { opener } : {}),
   });
   const entry = pending.get(nonce);
   if (assistantFirstMode() && entry && entry.kind === 'errand') {
@@ -2022,16 +2105,19 @@ export async function placeErrandCall(c: {
   return sid;
 }
 
-/** Twilio's view of a call leg: status (queued|ringing|in-progress|completed|busy|no-answer|failed|canceled) and seconds. */
-export async function twilioCallInfo(sid: string): Promise<{ status: string; duration: number } | null> {
+/**
+ * Twilio's view of a call leg: status (queued|ringing|in-progress|completed|busy|no-answer|failed|canceled),
+ * seconds, and where it went (a "sip:" address is the assistant's own leg to the voice service).
+ */
+export async function twilioCallInfo(sid: string): Promise<{ status: string; duration: number; to: string } | null> {
   if (!TWILIO_SID || !TWILIO_TOKEN || !sid) return null;
   try {
     const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls/${sid}.json`, {
       headers: { Authorization: `Basic ${Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64')}` },
     });
     if (!res.ok) return null;
-    const d = await res.json() as { status?: string; duration?: string | null };
-    return { status: d.status ?? '', duration: Number(d.duration ?? 0) || 0 };
+    const d = await res.json() as { status?: string; duration?: string | null; to?: string | null };
+    return { status: d.status ?? '', duration: Number(d.duration ?? 0) || 0, to: d.to ?? '' };
   } catch { return null; }
 }
 

@@ -19,11 +19,18 @@ export class ReplyGate {
 
   constructor(private fire: () => void, private waitMs: number, private timers: Timers = realTimers) {}
 
-  /** Their turn ended: answer after the beat, unless they keep going. */
-  turnEnded(): void {
+  /** Their turn ended: answer after the beat (or `waitMs`), unless they keep going. */
+  turnEnded(waitMs = this.waitMs): void {
     this.cancel();
-    if (this.waitMs <= 0) { this.fire(); return; }
-    this.timer = this.timers.set(() => { this.timer = undefined; this.fire(); }, this.waitMs);
+    if (waitMs <= 0) { this.fire(); return; }
+    this.timer = this.timers.set(() => { this.timer = undefined; this.fire(); }, waitMs);
+  }
+
+  /** Their words show they handed the turn over: skip what's left of the beat. */
+  now(): void {
+    if (!this.timer) return;
+    this.cancel();
+    this.fire();
   }
 
   /** They started talking: if the assistant was about to answer, hold it for their next pause. */
@@ -39,4 +46,31 @@ export class ReplyGate {
   }
 
   get waiting(): boolean { return this.timer !== undefined; }
+}
+
+// Not "yes", "okay" or "sure": over the end of the assistant's question those are answers.
+const FILLER = /^(hello|hi|hey|mhm|mm-?hmm|uh-?huh|hmm|um|uh)$/;
+/**
+ * "Hello?", "Hello? Can I help you?", "mhm": they're checking the line or just
+ * listening. Said while the assistant is answering, that answer already covers it.
+ */
+export function isPresenceCheck(text: string): boolean {
+  const t = text.toLowerCase().replace(/[^a-z'\- ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  const rest = t.replace(/^((hello|hi|hey|yes|yeah)\s*)+/, '').trim();
+  if (/^((how )?(can|may) (i|we) help( you)?|are you (still )?there|you there|anyone there|who'?s (this|calling))$/.test(rest)) return true;
+  const words = t.split(' ');
+  return words.length <= 3 && words.every((w) => FILLER.test(w));
+}
+
+/**
+ * Their turn hands the line back: a question, a greeting, or their name. The assistant answers
+ * as soon as these words are in rather than waiting out the beat for more.
+ */
+export function endsTurn(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/\?\s*$/.test(t)) return true;
+  if (isPresenceCheck(t)) return true;
+  return /\b(how (can|may) (i|we) help( you)?( today)?|this is [a-z]+( speaking)?|speaking|go ahead)[.!]?\s*$/i.test(t);
 }
